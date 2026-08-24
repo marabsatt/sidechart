@@ -1,0 +1,19 @@
+[project]
+name = "sidechart"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "marabsatt", email = "mitchelrabsatt@gmail.com" }
+]
+requires-python = ">=3.9"
+dependencies = [
+    "diagrams>=0.24.4",
+]
+
+[project.scripts]
+sidechart = "sidechart:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
