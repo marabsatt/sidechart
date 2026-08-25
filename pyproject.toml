@@ -9,6 +9,10 @@ authors = [
 requires-python = ">=3.9"
 dependencies = [
     "diagrams>=0.24.4",
+    "dotenv>=0.9.9",
+    "massive>=2.8.0",
+    "pandas>=2.3.3",
+    "polygon>=1.2.8",
 ]
 
 [project.scripts]
