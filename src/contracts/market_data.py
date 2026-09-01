@@ -7,7 +7,7 @@ from datetime import datetime
 
 load_dotenv(override=True)
 
-polygon_api_key = os.getenv("POLYGON_API_KEY")
+polygon_api_key = os.getenv('POLYGON_API_KEY')
 client = RESTClient(polygon_api_key)
 
 # Check to see if the market is open
@@ -17,39 +17,57 @@ def is_market_open() -> bool:
     Function that checks the market status using Massive's RESTClient
     
     Returns:
-        open — The regular trading session is active.
-        closed — The market or exchange is closed for the day or weekend.
-        extended-hours (pre-market / post-market) — Operating during early bird or after-hours trading sessions.
-        early-close — Used typically in holiday schedules when an exchange closes ahead of standard times.
+        open: The regular trading session is active.
+        closed: The market or exchange is closed for the day or weekend.
+        extended-hours (pre-market / post-market): Operating during early bird or after-hours trading sessions.
+        early-close: Used typically in holiday schedules when an exchange closes ahead of standard times.
     '''
     market_status = client.get_market_status()
     print(f'Market status: {market_status.market}')
     return market_status.market
 
-def get_market_data(ticker: str, start_date: str, end_date: str = datetime.now().strftime('%Y-%m-%d')) -> pd.DataFrame:
+def get_market_data(tickers, start_date: str, end_date: str = None) -> pd.DataFrame:
     '''
-    Function that retrieves market data for a given ticker symbol bewtween a specified start and end date
+    Function that retrieves market data for given ticker(s) between a specified start and end date
 
     Args:
-        ticker (str): The ticker symbol of the stock or asset.
+        tickers: A ticker symbol (str) or list of ticker symbols (list)
         start_date (str): The start date for the data retrieval in 'YYYY-MM-DD' format.
-        end_date (str): The end date for the data retrieval in 'YYYY-MM-DD' format. Defaults to the current date if not provided.
+        end_date (str): The end date for the data retrieval in 'YYYY-MM-DD' format. Defaults to today if not provided.
     
     Returns:
-        pd.DataFrame: A DataFrame containing the market (timestamp, open, high, low, close, volume) data for the specified ticker and date range.
+        pd.DataFrame: A DataFrame containing OHLCV data indexed by ticker and date
     '''
-    bars = client.get_aggs(ticker, 1, "day", start_date, end_date)
-    data = []
-    for bar in bars:
-        data.append({
-            "timestamp": datetime.fromtimestamp(bar.timestamp / 1000),
-            "open": bar.open,
-            "high": bar.high,
-            "low": bar.low,
-            "close": bar.close,
-            "volume": bar.volume
-        })
-    return pd.DataFrame(data)
+    if end_date is None:
+        end_date = datetime.now().strftime('%Y-%m-%d')
+    
+    if isinstance(tickers, str):
+        tickers = [tickers]
+    
+    all_data = {}
+    for ticker in tickers:
+        try:
+            bars = client.get_aggs(ticker, 1, 'day', start_date, end_date)
+            data = []
+            for bar in bars:
+                data.append({
+                    'ticker': ticker,
+                    'date': datetime.fromtimestamp(bar.timestamp / 1000).date(),
+                    'open': bar.open,
+                    'high': bar.high,
+                    'low': bar.low,
+                    'close': bar.close,
+                    'volume': bar.volume
+                })
+            if data:
+                all_data[ticker] = pd.DataFrame(data)
+        except Exception as e:
+            print(f'Error fetching data for {ticker}: {e}')
+    
+    if not all_data:
+        return pd.DataFrame(columns=['ticker', 'date', 'open', 'high', 'low', 'close', 'volume'])
+    
+    return pd.concat(all_data.values(), ignore_index=True)
 
 def get_nasdaq_tickers() -> list:
     '''
@@ -93,7 +111,7 @@ def get_cboe_tickers() -> list:
     Returns:
         list: A list of ticker symbols for all CBOE-listed companies
     '''
-    tickers = client.list_tickers(exchange = 'BATS', market="Indices", limit=1000)
+    tickers = client.list_tickers(exchange = 'BATS', market='Indices', limit=1000)
     cboe_tickers = [ticker.ticker for ticker in tickers]
     return cboe_tickers
 

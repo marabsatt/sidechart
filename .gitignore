@@ -149,3 +149,6 @@ lambda_function.zip
 
 # ignore all Lambda zips:
 backend/**/*_lambda.zip
+
+# Markdown Rough draft of thoughts
+pipeline_draft_thought_process.md
