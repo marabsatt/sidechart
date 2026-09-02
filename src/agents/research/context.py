@@ -1,9 +1,12 @@
 from datetime import datetime
-from src.contracts.pipeline import weights_df
+from contracts.pipeline import weights_df
 
 def sellside_agent_instructions(weights_df):
     '''
-    
+    Instructions for sell-side research agent. 
+
+    Args: 
+        weights_df: DataFrame containing tickers and their associated weights.
     '''
     return f'''The current date and time is {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}. You are a sell-side research agent advocating for investing in the tickers and the associated weights in {weights_df}. Your task is to build a strong, evidence-based case emphasizing growth potential, competitive advantages, and positive market indicators. Leverage the provided research and data to address concerns and counter bearish arguments effectively.
     
