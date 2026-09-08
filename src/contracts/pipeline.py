@@ -54,7 +54,7 @@ def run_analysis_pipeline(
             'error': 'No market data retrieved'
         }
     
-    print(f"  Retrieved data for {market_data['ticker'].nunique()} tickers")
+    print(f"Retrieved data for {market_data['ticker'].nunique()} tickers")
     
     # Step 2: Generate signals
     print("Step 2: Generating trading signals...")
@@ -99,3 +99,4 @@ def run_analysis_pipeline(
         'signals_data': signals_df,
         'weights': weights_df
     }
+
