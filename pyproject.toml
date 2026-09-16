@@ -27,4 +27,5 @@ build-backend = "uv_build"
 [tool.uv.workspace]
 members = [
     "src/agents/research",
+    "src/agents/supervisor",
 ]

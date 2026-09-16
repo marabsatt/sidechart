@@ -20,6 +20,7 @@ from .signals import signal_generator
 from .portfolio import get_top_performers
 from .risk import port_opt
 from .execution import execute_rebalance
+from .rebalance import RebalanceProposal
 
 
 def run_analysis_pipeline(
@@ -99,4 +100,3 @@ def run_analysis_pipeline(
         'signals_data': signals_df,
         'weights': weights_df
     }
-
