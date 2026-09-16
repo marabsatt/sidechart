@@ -16,11 +16,10 @@ from typing import Optional
 from ib_insync import IB
 
 from .market_data import get_market_data
-from .signals import signal_generator
+from ..signals import signal_generator
 from .portfolio import get_top_performers
 from .risk import port_opt
-from .execution import execute_rebalance
-from .rebalance import RebalanceProposal
+from ..execution import execute_rebalance
 
 
 def run_analysis_pipeline(
@@ -55,7 +54,7 @@ def run_analysis_pipeline(
             'error': 'No market data retrieved'
         }
     
-    print(f"Retrieved data for {market_data['ticker'].nunique()} tickers")
+    print(f"  Retrieved data for {market_data['ticker'].nunique()} tickers")
     
     # Step 2: Generate signals
     print("Step 2: Generating trading signals...")
@@ -100,3 +99,61 @@ def run_analysis_pipeline(
         'signals_data': signals_df,
         'weights': weights_df
     }
+
+
+def run_trading_pipeline(
+    ib: IB,
+    tickers: list,
+    lookback_days: int = 30,
+    num_signals: int = 20,
+    account_value: Optional[float] = None,
+    sell_timeout: float = 300.0,
+) -> dict:
+    """
+    Run the complete pipeline including trade execution.
+    
+    Args:
+        ib (IB): Connected ib_insync IB instance
+        tickers (list): List of ticker symbols to analyze
+        lookback_days (int): Number of days to look back for analysis
+        num_signals (int): Number of top performers to select
+        account_value (float): Account net liquidation value (auto-fetched if None)
+        sell_timeout (float): Timeout for waiting on sell orders (seconds)
+    
+    Returns:
+        dict: Results including analysis and trade execution status
+    """
+    # Run analysis pipeline
+    analysis_results = run_analysis_pipeline(
+        tickers=tickers,
+        lookback_days=lookback_days,
+        num_signals=num_signals
+    )
+    
+    if analysis_results['status'] != 'success':
+        print("Analysis pipeline did not produce complete results")
+        return analysis_results
+    
+    # Step 5: Execute trades
+    print("Step 5: Executing trades...")
+    try:
+        trades = execute_rebalance(
+            ib=ib,
+            target_weights=analysis_results['weights'],
+            account_value=account_value,
+            sell_timeout=sell_timeout
+        )
+        print(f"  Submitted {len(trades)} trades")
+        
+        return {
+            **analysis_results,
+            'trades': trades,
+            'execution_status': 'success'
+        }
+    except Exception as e:
+        print(f"Error during trade execution: {e}")
+        return {
+            **analysis_results,
+            'execution_status': 'failed',
+            'execution_error': str(e)
+        }

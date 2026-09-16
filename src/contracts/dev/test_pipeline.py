@@ -16,10 +16,10 @@ from typing import Optional
 from ib_insync import IB
 
 from .market_data import get_market_data
-from .signals import signal_generator
+from ..signals import signal_generator
 from .portfolio import get_top_performers
 from .risk import port_opt
-from .execution import execute_rebalance
+from ..execution import execute_rebalance
 
 
 def run_analysis_pipeline(

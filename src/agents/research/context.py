@@ -1,5 +1,5 @@
 from datetime import datetime
-from contracts.pipeline import run_analysis_pipeline
+from contracts.prod.pipeline import run_analysis_pipeline
 
 def sellside_agent_instructions():
     '''

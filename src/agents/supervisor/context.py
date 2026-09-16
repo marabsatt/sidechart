@@ -167,7 +167,7 @@ def supervisor_agent(
     if pipeline_results is None:
         pipeline_results = {}
         if tickers:
-            from contracts.pipeline import run_analysis_pipeline
+            from contracts.prod.pipeline import run_analysis_pipeline
 
             pipeline_results = run_analysis_pipeline(
                 tickers=tickers,

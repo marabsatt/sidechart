@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 # Import pipeline components
 from src.contracts.signals import signal_generator
-from src.contracts.portfolio import pflio
+from contracts.prod.portfolio import pflio
 
 def test_complete_pipeline():
     print("=" * 70)
