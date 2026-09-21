@@ -791,7 +791,7 @@ export default function Home() {
 
             <div className="field-grid">
               <div className="field">
-                <label htmlFor="lookback">Lookback</label>
+                <label htmlFor="lookback">Lookback (in days)</label>
                 <input
                   id="lookback"
                   type="number"
