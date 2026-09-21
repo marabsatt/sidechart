@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, type ReactNode, useMemo, useState } from "react";
 
 type ApiState = "idle" | "loading" | "ready" | "error";
 
@@ -26,6 +26,9 @@ type PipelineResult = {
   market_data?: MarketRow[];
   signals_data?: MarketRow[];
   weights?: WeightRow[];
+  candidate_tickers?: string[];
+  allocation_tickers?: string[];
+  signal_fallback?: boolean;
 };
 
 type SignalsResult = {
@@ -40,11 +43,22 @@ type ExecutionPreview = {
   message?: string;
 };
 
+type AgentRunResult = {
+  output: string;
+  context?: string;
+};
+
 const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ??
   "http://127.0.0.1:8000";
 
 const DEFAULT_TICKERS = "AAPL, MSFT, NVDA, AMZN, GOOGL, META, JPM, XOM";
+const RATIONALE_REQUIREMENTS = [
+  "3-6 concise paragraphs explaining the allocation decision",
+  "cite supporting research, signal, and performance evidence",
+  "identify unavailable data instead of guessing",
+  "include the informational-analysis disclaimer",
+];
 
 function parseTickers(value: string) {
   return Array.from(
@@ -71,6 +85,283 @@ function formatDateTime() {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date());
+}
+
+function summarizeText(value: string, maxLength = 520) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "No sell-side agent information supplied.";
+  }
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxLength).trim()}...`;
+}
+
+function buildSupervisorBrief(researchNote: string) {
+  return [
+    "Condensed sell-side context:",
+    summarizeText(researchNote),
+    "",
+    "Rationale section should return:",
+    ...RATIONALE_REQUIREMENTS.map((item) => `- ${item}`),
+  ].join("\n");
+}
+
+function latestMonthlyReturns(rows: MarketRow[], candidateTickers: string[]) {
+  const candidates = new Set(candidateTickers);
+  const byTicker = new Map<string, MarketRow[]>();
+
+  for (const row of rows) {
+    if (!candidates.has(row.ticker)) {
+      continue;
+    }
+    const tickerRows = byTicker.get(row.ticker) ?? [];
+    tickerRows.push(row);
+    byTicker.set(row.ticker, tickerRows);
+  }
+
+  return Array.from(byTicker.entries())
+    .map(([ticker, tickerRows]) => {
+      const sortedRows = tickerRows
+        .filter((row) => typeof row.close === "number")
+        .sort((first, second) => String(first.date).localeCompare(String(second.date)));
+      const latest = sortedRows.at(-1);
+      const previous = sortedRows.at(-2);
+      const latestClose = Number(latest?.close ?? 0);
+      const previousClose = Number(previous?.close ?? 0);
+      return {
+        ticker,
+        monthlyReturn:
+          latestClose > 0 && previousClose > 0
+            ? (latestClose - previousClose) / previousClose
+            : Number.NEGATIVE_INFINITY,
+      };
+    })
+    .filter((row) => Number.isFinite(row.monthlyReturn))
+    .sort((first, second) => second.monthlyReturn - first.monthlyReturn);
+}
+
+function sameTickerSet(first: string[], second: string[]) {
+  if (first.length !== second.length) {
+    return false;
+  }
+  const firstSet = new Set(first);
+  return second.every((ticker) => firstSet.has(ticker));
+}
+
+function splitTableRow(line: string) {
+  return line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
+function isTableSeparator(line: string) {
+  const cells = splitTableRow(line);
+  return cells.length > 1 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function isTableStart(lines: string[], index: number) {
+  return Boolean(
+    lines[index]?.includes("|") &&
+      lines[index + 1]?.includes("|") &&
+      isTableSeparator(lines[index + 1]),
+  );
+}
+
+function isMarkdownBoundary(lines: string[], index: number) {
+  const line = lines[index] ?? "";
+  return (
+    /^#{1,4}\s+/.test(line) ||
+    /^[-*]\s+/.test(line) ||
+    /^\d+\.\s+/.test(line) ||
+    isTableStart(lines, index)
+  );
+}
+
+function renderInlineMarkdown(text: string, keyPrefix: string): ReactNode[] {
+  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
+  return parts.map((part, index) => {
+    const key = `${keyPrefix}-${index}`;
+    if (part.startsWith("**") && part.endsWith("**")) {
+      return <strong key={key}>{part.slice(2, -2)}</strong>;
+    }
+    if (part.startsWith("`") && part.endsWith("`")) {
+      return <code key={key}>{part.slice(1, -1)}</code>;
+    }
+    return part;
+  });
+}
+
+function renderMemoHeading(level: number, content: ReactNode[], key: string) {
+  if (level <= 1) {
+    return (
+      <h2 className="memo-heading" key={key}>
+        {content}
+      </h2>
+    );
+  }
+  if (level === 2) {
+    return (
+      <h3 className="memo-heading" key={key}>
+        {content}
+      </h3>
+    );
+  }
+  if (level === 3) {
+    return (
+      <h4 className="memo-heading" key={key}>
+        {content}
+      </h4>
+    );
+  }
+  return (
+    <h5 className="memo-heading" key={key}>
+      {content}
+    </h5>
+  );
+}
+
+function MarkdownMemo({
+  content,
+  placeholder,
+}: {
+  content: string;
+  placeholder: string;
+}) {
+  const source = content.trim();
+  if (!source) {
+    return (
+      <div className="agent-output">
+        <p className="memo-placeholder">{placeholder}</p>
+      </div>
+    );
+  }
+
+  const lines = source.split(/\r?\n/);
+  const blocks: ReactNode[] = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index].trim();
+    if (!line) {
+      index += 1;
+      continue;
+    }
+
+    if (isTableStart(lines, index)) {
+      const headers = splitTableRow(lines[index]);
+      const rows: string[][] = [];
+      index += 2;
+      while (index < lines.length && lines[index].includes("|")) {
+        const row = splitTableRow(lines[index]);
+        if (!isTableSeparator(lines[index]) && row.length > 1) {
+          rows.push(row);
+        }
+        index += 1;
+      }
+      blocks.push(
+        <div className="memo-table-wrap" key={`table-${index}`}>
+          <table className="memo-table">
+            <thead>
+              <tr>
+                {headers.map((header, cellIndex) => (
+                  <th key={`${header}-${cellIndex}`}>
+                    {renderInlineMarkdown(header, `table-head-${index}-${cellIndex}`)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, rowIndex) => (
+                <tr key={`row-${index}-${rowIndex}`}>
+                  {headers.map((_, cellIndex) => (
+                    <td key={`cell-${index}-${rowIndex}-${cellIndex}`}>
+                      {renderInlineMarkdown(
+                        row[cellIndex] ?? "",
+                        `table-cell-${index}-${rowIndex}-${cellIndex}`,
+                      )}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      );
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,4})\s+(.+)$/);
+    if (heading) {
+      blocks.push(
+        renderMemoHeading(
+          heading[1].length,
+          renderInlineMarkdown(heading[2], `heading-${index}`),
+          `heading-${index}`,
+        ),
+      );
+      index += 1;
+      continue;
+    }
+
+    if (/^[-*]\s+/.test(line)) {
+      const items: string[] = [];
+      while (index < lines.length && /^[-*]\s+/.test(lines[index].trim())) {
+        items.push(lines[index].trim().replace(/^[-*]\s+/, ""));
+        index += 1;
+      }
+      blocks.push(
+        <ul className="memo-list" key={`ul-${index}`}>
+          {items.map((item, itemIndex) => (
+            <li key={`ul-${index}-${itemIndex}`}>
+              {renderInlineMarkdown(item, `ul-${index}-${itemIndex}`)}
+            </li>
+          ))}
+        </ul>,
+      );
+      continue;
+    }
+
+    if (/^\d+\.\s+/.test(line)) {
+      const items: string[] = [];
+      while (index < lines.length && /^\d+\.\s+/.test(lines[index].trim())) {
+        items.push(lines[index].trim().replace(/^\d+\.\s+/, ""));
+        index += 1;
+      }
+      blocks.push(
+        <ol className="memo-list" key={`ol-${index}`}>
+          {items.map((item, itemIndex) => (
+            <li key={`ol-${index}-${itemIndex}`}>
+              {renderInlineMarkdown(item, `ol-${index}-${itemIndex}`)}
+            </li>
+          ))}
+        </ol>,
+      );
+      continue;
+    }
+
+    const paragraphLines = [line];
+    index += 1;
+    while (
+      index < lines.length &&
+      lines[index].trim() &&
+      !isMarkdownBoundary(lines, index)
+    ) {
+      paragraphLines.push(lines[index].trim());
+      index += 1;
+    }
+    blocks.push(
+      <p className="memo-paragraph" key={`p-${index}`}>
+        {renderInlineMarkdown(paragraphLines.join(" "), `p-${index}`)}
+      </p>,
+    );
+  }
+
+  return <div className="agent-output">{blocks}</div>;
 }
 
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
@@ -117,6 +408,8 @@ export default function Home() {
   const [signals, setSignals] = useState<SignalsResult | null>(null);
   const [pipeline, setPipeline] = useState<PipelineResult | null>(null);
   const [supervisorContext, setSupervisorContext] = useState("");
+  const [researchAgentOutput, setResearchAgentOutput] = useState("");
+  const [supervisorAgentOutput, setSupervisorAgentOutput] = useState("");
   const [executionPreview, setExecutionPreview] =
     useState<ExecutionPreview | null>(null);
 
@@ -127,6 +420,10 @@ export default function Home() {
   const latestSignals = (pipeline?.signals_data ?? signals?.signals_data ?? [])
     .slice(-10)
     .reverse();
+  const supervisorBrief = useMemo(
+    () => buildSupervisorBrief(researchNote),
+    [researchNote],
+  );
 
   const allocationTotal = weights.reduce(
     (total, row) => total + Number(row.weights ?? 0),
@@ -152,20 +449,22 @@ export default function Home() {
     setWorkflowState("loading");
     setMessage("Requesting market data...");
     try {
+      const workingTickers =
+        tickers.length > 0 ? tickers : await discoverBullishUniverse();
       const response = await apiRequest<{
         data: MarketRow[];
         failed_tickers: [string, string][];
       }>("/market-data", {
         method: "POST",
         body: JSON.stringify({
-          tickers,
+          tickers: workingTickers,
           period: "1y",
           interval: "1d",
         }),
       });
       setMarketData(response.data);
       setMessage(
-        `Loaded ${response.data.length.toLocaleString()} market rows for ${tickers.length} tickers.`,
+        `Loaded ${response.data.length.toLocaleString()} market rows for ${workingTickers.length} tickers.`,
       );
       setWorkflowState("ready");
     } catch (error) {
@@ -174,16 +473,101 @@ export default function Home() {
     }
   }
 
+  async function discoverBullishUniverse() {
+    setWorkflowState("loading");
+    setMessage(
+      "Universe is empty. Discovering bullish stocks with the strongest latest monthly returns...",
+    );
+
+    const response = await apiRequest<{ data: MarketRow[] }>("/market-data", {
+      method: "POST",
+      body: JSON.stringify({
+        tickers: null,
+        period: "3y",
+        interval: "1mo",
+      }),
+    });
+
+    if (response.data.length === 0) {
+      throw new Error("No market data returned for automatic universe discovery.");
+    }
+
+    setMarketData(response.data);
+
+    const signalResponse = await apiRequest<SignalsResult>("/signals/generate", {
+      method: "POST",
+      body: JSON.stringify({ market_data: response.data }),
+    });
+
+    setSignals(signalResponse);
+
+    const rankedTickers = latestMonthlyReturns(
+      response.data,
+      signalResponse.bullish_tickers,
+    )
+      .slice(0, Math.max(numSignals, 1))
+      .map((row) => row.ticker);
+
+    if (rankedTickers.length === 0) {
+      throw new Error("No bullish stocks with valid monthly returns were found.");
+    }
+
+    setTickersInput(rankedTickers.join(", "));
+    setMessage(
+      `Universe populated with ${rankedTickers.length} bullish stocks ranked by latest monthly return.`,
+    );
+    return rankedTickers;
+  }
+
+  function applyPipelineResult(response: PipelineResult) {
+    setPipeline(response);
+    if (response.market_data) {
+      setMarketData(response.market_data);
+    }
+    if (response.signals_data) {
+      setSignals({
+        bullish_tickers: response.bullish_tickers ?? [],
+        bearish_tickers: response.bearish_tickers ?? [],
+        signals_data: response.signals_data,
+      });
+    }
+  }
+
+  async function ensurePipelineResults(workingTickers: string[]) {
+    const pipelineTickers =
+      pipeline?.allocation_tickers ?? pipeline?.weights?.map((row) => row.ticker) ?? [];
+    if (pipeline?.weights?.length && sameTickerSet(pipelineTickers, workingTickers)) {
+      return pipeline;
+    }
+
+    setMessage("Running analysis pipeline before agent synthesis...");
+    const response = await apiRequest<PipelineResult>("/pipeline/dev/analyze", {
+      method: "POST",
+      body: JSON.stringify({
+        tickers: workingTickers,
+        lookback_days: lookbackDays,
+        num_signals: numSignals,
+      }),
+    });
+    applyPipelineResult(response);
+    return response;
+  }
+
   async function generateSignals() {
     setWorkflowState("loading");
     try {
       let rows = marketData;
+      let workingTickers = tickers;
+      if (workingTickers.length === 0) {
+        workingTickers = await discoverBullishUniverse();
+        rows = [];
+      }
       if (rows.length === 0) {
         setMessage("Requesting market data before signal generation...");
         const response = await apiRequest<{ data: MarketRow[] }>("/market-data", {
           method: "POST",
           body: JSON.stringify({
-            tickers,
+            tickers: workingTickers,
             period: "1y",
             interval: "1d",
           }),
@@ -222,28 +606,22 @@ export default function Home() {
     setWorkflowState("loading");
     setMessage("Running analysis pipeline...");
     try {
+      const workingTickers =
+        tickers.length > 0 ? tickers : await discoverBullishUniverse();
       const response = await apiRequest<PipelineResult>("/pipeline/dev/analyze", {
         method: "POST",
         body: JSON.stringify({
-          tickers,
+          tickers: workingTickers,
           lookback_days: lookbackDays,
           num_signals: numSignals,
         }),
       });
-      setPipeline(response);
-      if (response.market_data) {
-        setMarketData(response.market_data);
-      }
-      if (response.signals_data) {
-        setSignals({
-          bullish_tickers: response.bullish_tickers ?? [],
-          bearish_tickers: response.bearish_tickers ?? [],
-          signals_data: response.signals_data,
-        });
-      }
+      applyPipelineResult(response);
       setMessage(
         response.status === "success"
           ? `Pipeline complete with ${response.weights?.length ?? 0} target positions.`
+          : response.status === "fallback"
+            ? `No daily bullish signals found; using ${response.candidate_tickers?.length ?? 0} pre-screened candidates for allocation.`
           : response.error ?? `Pipeline returned ${response.status ?? "partial"} status.`,
       );
       setWorkflowState(response.status === "failed" ? "error" : "ready");
@@ -253,17 +631,81 @@ export default function Home() {
     }
   }
 
+  async function runResearchAgent() {
+    setWorkflowState("loading");
+    setMessage("Running sell-side research agent...");
+    try {
+      const workingTickers =
+        tickers.length > 0 ? tickers : await discoverBullishUniverse();
+      const pipelineResults = await ensurePipelineResults(workingTickers);
+      const response = await apiRequest<AgentRunResult>("/agents/research/run", {
+        method: "POST",
+        body: JSON.stringify({
+          tickers: workingTickers,
+          source_context: researchNote,
+          pipeline_results: pipelineResults,
+          lookback_days: lookbackDays,
+          num_signals: numSignals,
+        }),
+      });
+
+      setResearchAgentOutput(response.output);
+      setResearchNote(response.output);
+      setMessage("Sell-side research agent output generated.");
+      setWorkflowState("ready");
+    } catch (error) {
+      setWorkflowState("error");
+      setMessage(
+        error instanceof Error ? error.message : "Research agent run failed.",
+      );
+    }
+  }
+
+  async function runSupervisorAgent() {
+    setWorkflowState("loading");
+    setMessage("Running supervisor agent...");
+    try {
+      const workingTickers =
+        tickers.length > 0 ? tickers : await discoverBullishUniverse();
+      const pipelineResults = await ensurePipelineResults(workingTickers);
+      const sellsideResearch =
+        researchAgentOutput || researchNote || "No sell-side research output supplied.";
+      const response = await apiRequest<AgentRunResult>("/agents/supervisor/run", {
+        method: "POST",
+        body: JSON.stringify({
+          tickers: workingTickers,
+          sellside_research: sellsideResearch,
+          pipeline_results: pipelineResults,
+          lookback_days: lookbackDays,
+          num_signals: numSignals,
+        }),
+      });
+
+      setSupervisorContext(response.context ?? "");
+      setSupervisorAgentOutput(response.output);
+      setMessage("Supervisor agent output generated.");
+      setWorkflowState("ready");
+    } catch (error) {
+      setWorkflowState("error");
+      setMessage(
+        error instanceof Error ? error.message : "Supervisor agent run failed.",
+      );
+    }
+  }
+
   async function buildSupervisorContext() {
     setWorkflowState("loading");
     setMessage("Building supervisor context...");
     try {
+      const workingTickers =
+        tickers.length > 0 ? tickers : await discoverBullishUniverse();
       const response = await apiRequest<{ context: string }>(
         "/agents/supervisor/context",
         {
           method: "POST",
           body: JSON.stringify({
-            tickers,
-            sellside_research: researchNote,
+            tickers: workingTickers,
+            sellside_research: supervisorBrief,
             pipeline_results: pipeline ?? {
               status: "not_run",
               bullish_tickers: bullish,
@@ -289,18 +731,20 @@ export default function Home() {
   }
 
   async function previewExecution() {
-    const divisor = Math.min(tickers.length, Math.max(1, numSignals));
-    const targetWeights =
-      weights.length > 0
-        ? weights
-        : tickers.slice(0, divisor).map((ticker) => ({
-            ticker,
-            weights: 1 / divisor,
-          }));
-
     setWorkflowState("loading");
     setMessage("Preparing dry-run execution preview...");
     try {
+      const executionTickers =
+        tickers.length > 0 ? tickers : await discoverBullishUniverse();
+      const divisor = Math.min(executionTickers.length, Math.max(1, numSignals));
+      const targetWeights =
+        weights.length > 0
+          ? weights
+          : executionTickers.slice(0, divisor).map((ticker) => ({
+              ticker,
+              weights: 1 / divisor,
+            }));
+
       const response = await apiRequest<ExecutionPreview>("/execution/rebalance", {
         method: "POST",
         body: JSON.stringify({
@@ -394,7 +838,23 @@ export default function Home() {
                 rows={6}
               />
             </div>
+            <div className="field">
+              <label htmlFor="supervisor-brief">Supervisor rationale brief</label>
+              <textarea
+                id="supervisor-brief"
+                value={supervisorBrief}
+                readOnly
+                rows={8}
+                className="readonly-textarea"
+              />
+            </div>
             <div className="button-stack">
+              <button type="button" onClick={runResearchAgent}>
+                Run research agent
+              </button>
+              <button type="button" onClick={runSupervisorAgent}>
+                Run supervisor agent
+              </button>
               <button type="button" onClick={buildSupervisorContext}>
                 Build supervisor context
               </button>
@@ -529,6 +989,34 @@ export default function Home() {
               </table>
             </div>
           </section>
+
+          <div className="content-grid lower-grid">
+            <section className="panel text-panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">Research Agent</p>
+                  <h2>Sell-side output</h2>
+                </div>
+              </div>
+              <MarkdownMemo
+                content={researchAgentOutput}
+                placeholder="Run the research agent to generate sell-side analysis."
+              />
+            </section>
+
+            <section className="panel text-panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">Supervisor Agent</p>
+                  <h2>Rebalance rationale</h2>
+                </div>
+              </div>
+              <MarkdownMemo
+                content={supervisorAgentOutput}
+                placeholder="Run the supervisor agent to generate the proposal and rationale."
+              />
+            </section>
+          </div>
 
           <div className="content-grid lower-grid">
             <section className="panel text-panel">

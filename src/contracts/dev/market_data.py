@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 # Class for accessing financial data
+import os
+from io import StringIO
+
 import yfinance as yf
 
 # Classes for Web scraping
@@ -17,6 +20,33 @@ HEADERS = {
     )
 }
 
+DEFAULT_DISCOVERY_TICKERS = [
+    'AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'AVGO', 'TSLA', 'JPM', 'LLY',
+    'V', 'UNH', 'XOM', 'MA', 'COST', 'WMT', 'NFLX', 'HD', 'PG', 'JNJ',
+    'ABBV', 'BAC', 'CRM', 'ORCL', 'CVX', 'KO', 'AMD', 'MRK', 'PEP', 'TMO',
+    'ADBE', 'CSCO', 'LIN', 'MCD', 'ACN', 'ABT', 'QCOM', 'DHR', 'GE', 'TXN',
+    'INTU', 'AMAT', 'NOW', 'PM', 'IBM', 'DIS', 'CAT', 'VZ', 'NEE', 'ISRG',
+]
+
+
+def _max_auto_tickers() -> int:
+    try:
+        return int(os.getenv('MARKET_DATA_MAX_TICKERS', '120'))
+    except ValueError:
+        return 120
+
+
+def _dedupe_tickers(tickers: list[str]) -> list[str]:
+    seen = set()
+    deduped = []
+    for ticker in tickers:
+        normalized = str(ticker).strip().upper()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
+
 
 def get_nasdaq_100_tickers() -> list:
     '''
@@ -25,22 +55,23 @@ def get_nasdaq_100_tickers() -> list:
     Returns:
         list: A list of tickers symbols in the nasdaq 100 index
     '''
-    url = "http://en.wikipedia.org/wiki/Nasdaq-100#Components"
+    url = "https://en.wikipedia.org/wiki/Nasdaq-100#Components"
     nasdaq_stocks = pd.Series(dtype=str)
 
     try:
         response = requests.get(url, headers=HEADERS, timeout=20)
         response.raise_for_status()  # Raise an exception for HTTP errors
         html_content = response.text  # Print the HTML content of the page
-        soup = BeautifulSoup(html_content, 'html.parser')
-        table = soup.find('table', {'class': 'wikitable sortable'})
-        company_ticker = pd.read_html(str(table))[0]
-        nasdaq_stocks = company_ticker['Ticker']
+        tables = pd.read_html(StringIO(html_content), flavor='lxml')
+        for table in tables:
+            if 'Ticker' in table.columns:
+                nasdaq_stocks = table['Ticker']
+                break
         
-    except requests.exceptions.RequestException as e:
+    except Exception as e:
         print(f"Error fetching URL: {e}")
 
-    nasdaq_ticker_list = nasdaq_stocks.tolist()
+    nasdaq_ticker_list = _dedupe_tickers(nasdaq_stocks.tolist())
     return nasdaq_ticker_list
 
 def get_sp500_tickers() -> list:
@@ -57,10 +88,9 @@ def get_sp500_tickers() -> list:
         response = requests.get(url, headers=HEADERS, timeout=20)
         response.raise_for_status()  # Raise an exception for HTTP errors
         html_content = response.text  # Print the HTML content of the page
-        soup = BeautifulSoup(html_content, 'html.parser')
-        tables = pd.read_html(str(soup))
+        tables = pd.read_html(StringIO(html_content), flavor='lxml')
         sp_stocks = tables[0]['Symbol']
-    except requests.exceptions.RequestException as e:
+    except Exception as e:
         print(f"Error fetching URL: {e}")
 
     sp_ticker_list = sp_stocks.tolist()
@@ -71,7 +101,7 @@ def get_sp500_tickers() -> list:
     if 'BF.B' in sp_ticker_list:
         sp_ticker_list[sp_ticker_list.index('BF.B')] = 'BF-B'
 
-    return sp_ticker_list
+    return _dedupe_tickers(sp_ticker_list)
 
 
 def _normalize_yfinance_frame(ticker: str, data: pd.DataFrame) -> pd.DataFrame:
@@ -120,7 +150,7 @@ def get_market_data(
     start_date: str | None = None,
     end_date: str | None = None,
     period: str = '3y',
-    interval: str = '1mo',
+    interval: str = '1d',
 ) -> pd.DataFrame:
     '''
     Function that retrieves market data for a given ticker or a list of tickers using yfinance. If no tickers are provided, it retrieves all the data from the nasdaq 100 and s&p 500. 
@@ -140,7 +170,12 @@ def get_market_data(
         tickers = [tickers]
 
     elif tickers is None:
-        tickers = list(set(get_sp500_tickers() + get_nasdaq_100_tickers()))
+        tickers = _dedupe_tickers(get_sp500_tickers() + get_nasdaq_100_tickers())
+        if not tickers:
+            tickers = DEFAULT_DISCOVERY_TICKERS
+        tickers = tickers[:_max_auto_tickers()]
+    else:
+        tickers = _dedupe_tickers(tickers)
 
     failed_tickers = []
     market_data = []

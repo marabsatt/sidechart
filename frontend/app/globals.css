@@ -86,6 +86,14 @@ textarea {
   line-height: 1.45;
 }
 
+.readonly-textarea {
+  background: var(--panel-strong);
+  color: #344054;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 12px;
+  resize: vertical;
+}
+
 input:focus,
 textarea:focus {
   border-color: var(--accent);
@@ -446,6 +454,87 @@ tbody tr:last-child td {
   font-size: 12px;
   line-height: 1.6;
   white-space: pre-wrap;
+}
+
+.agent-output {
+  max-height: 520px;
+  overflow: auto;
+  margin: 0;
+  padding: 16px;
+  color: #283341;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.memo-heading {
+  margin: 18px 0 8px;
+  color: var(--ink);
+  font-size: 15px;
+  line-height: 1.3;
+  font-weight: 760;
+}
+
+.agent-output > .memo-heading:first-child {
+  margin-top: 0;
+}
+
+.memo-paragraph {
+  margin: 0 0 12px;
+}
+
+.memo-list {
+  margin: 0 0 14px 18px;
+  padding: 0;
+}
+
+.memo-list li {
+  margin: 4px 0;
+  padding-left: 2px;
+}
+
+.agent-output strong {
+  color: var(--ink);
+  font-weight: 760;
+}
+
+.agent-output code {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel-strong);
+  padding: 1px 4px;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 12px;
+}
+
+.memo-table-wrap {
+  overflow-x: auto;
+  margin: 10px 0 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.memo-table {
+  min-width: 100%;
+  font-size: 12px;
+}
+
+.memo-table th,
+.memo-table td {
+  height: auto;
+  min-width: 120px;
+  padding: 9px 10px;
+  text-align: left;
+  vertical-align: top;
+  white-space: normal;
+}
+
+.memo-table th {
+  background: var(--panel-strong);
+}
+
+.memo-placeholder {
+  margin: 0;
+  color: var(--muted);
 }
 
 .execution-list {

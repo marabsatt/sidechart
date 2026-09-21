@@ -160,6 +160,42 @@ def _make_json_safe(value: Any) -> Any:
     return value
 
 
+def _compact_pipeline_results(pipeline_results: dict[str, Any] | None) -> dict[str, Any]:
+    if not pipeline_results:
+        return {"status": "not_run"}
+
+    compact = {
+        "status": pipeline_results.get("status"),
+        "bullish_tickers": pipeline_results.get("bullish_tickers", [])[:30],
+        "bearish_tickers": pipeline_results.get("bearish_tickers", [])[:30],
+        "top_performers": pipeline_results.get("top_performers", [])[:30],
+        "candidate_tickers": pipeline_results.get("candidate_tickers", [])[:30],
+        "allocation_tickers": pipeline_results.get("allocation_tickers", [])[:30],
+        "signal_fallback": pipeline_results.get("signal_fallback"),
+        "weights": pipeline_results.get("weights", [])[:30],
+    }
+
+    market_data = pipeline_results.get("market_data", [])
+    signals_data = pipeline_results.get("signals_data", [])
+    if isinstance(market_data, list):
+        compact["market_data_sample"] = market_data[-30:]
+        compact["market_data_rows"] = len(market_data)
+    if isinstance(signals_data, list):
+        compact["signals_data_sample"] = signals_data[-30:]
+        compact["signals_data_rows"] = len(signals_data)
+
+    return _make_json_safe(compact)
+
+
+def _chat_completion_text(messages: list[dict[str, str]], temperature: float = 0.2) -> str:
+    response = _get_openai_client().chat.completions.create(
+        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        messages=messages,
+        temperature=temperature,
+    )
+    return response.choices[0].message.content or ""
+
+
 def _trade_to_record(trade: Any) -> dict[str, Any]:
     contract = getattr(trade, "contract", None)
     order = getattr(trade, "order", None)
@@ -304,6 +340,18 @@ class SupervisorContextRequest(BaseModel):
     current_positions: Optional[list[dict[str, Any]]] = None
     lookback_days: int = Field(default=30, gt=0)
     num_signals: int = Field(default=20, gt=0)
+
+
+class ResearchAgentRunRequest(BaseModel):
+    tickers: Optional[list[str]] = None
+    source_context: Optional[str] = None
+    pipeline_results: Optional[dict[str, Any]] = None
+    lookback_days: int = Field(default=30, gt=0)
+    num_signals: int = Field(default=20, gt=0)
+
+
+class SupervisorAgentRunRequest(SupervisorContextRequest):
+    pass
 
 
 class AgentIngestRequest(BaseModel):
@@ -666,6 +714,67 @@ async def get_research_agent_prompt():
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@app.post("/agents/research/run")
+async def run_research_agent(request: ResearchAgentRunRequest):
+    try:
+        research_context = _load_local_module(
+            "sidechart_research_context",
+            SRC_DIR / "agents" / "research" / "context.py",
+        )
+
+        tickers = _normalize_tickers(request.tickers)
+        compact_pipeline = _compact_pipeline_results(request.pipeline_results)
+        user_context = request.source_context or "No additional sell-side notes supplied."
+        prompt = f"""
+Generate an institutional sell-side research output for the SideChart workflow.
+
+Ticker universe:
+{tickers or "Unavailable"}
+
+User supplied research context:
+{user_context}
+
+SideChart pipeline context:
+{json.dumps(compact_pipeline, indent=2)}
+
+Requirements:
+- Cover every ticker in the supplied ticker universe. Do not select only one
+  ticker unless the universe contains one ticker.
+- Include every ticker in a coverage matrix and in ticker-by-ticker notes.
+- Use the target weights, signal classifications, latest indicators, and
+  performance context from the SideChart pipeline where available.
+- Separate observed data from estimates.
+- State unavailable valuation, filing, or news data explicitly.
+- Keep the output professional, concise, and suitable for a buy-side portfolio
+  manager or investment committee.
+- Include an informational-analysis disclaimer.
+
+Output format:
+Portfolio Research Note
+1. Executive Summary
+2. Coverage Matrix
+3. Ticker-by-Ticker Notes
+4. Portfolio Implications
+5. Compliance Note
+"""
+
+        output = _chat_completion_text(
+            [
+                {
+                    "role": "system",
+                    "content": research_context.DEFAULT_RESEARCH_PROMPT.strip(),
+                },
+                {"role": "user", "content": prompt.strip()},
+            ],
+            temperature=0.2,
+        )
+        return {"output": output}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @app.post("/agents/supervisor/context")
 async def get_supervisor_agent_context(request: SupervisorContextRequest):
     try:
@@ -683,6 +792,43 @@ async def get_supervisor_agent_context(request: SupervisorContextRequest):
             num_signals=request.num_signals,
         )
         return {"context": context}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/agents/supervisor/run")
+async def run_supervisor_agent(request: SupervisorAgentRunRequest):
+    try:
+        supervisor_context = _load_local_module(
+            "sidechart_supervisor_context",
+            SRC_DIR / "agents" / "supervisor" / "context.py",
+        )
+
+        context = supervisor_context.supervisor_agent(
+            tickers=_normalize_tickers(request.tickers),
+            sellside_research=request.sellside_research,
+            pipeline_results=request.pipeline_results,
+            current_positions=request.current_positions,
+            lookback_days=request.lookback_days,
+            num_signals=request.num_signals,
+        )
+        output = _chat_completion_text(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are the SideChart supervisor agent. Produce a clean, finance-professional "
+                        "rebalance memo with exactly two top-level sections: RebalanceProposal and "
+                        "Rationale. Use markdown tables for ticker/action details. Do not execute trades."
+                    ),
+                },
+                {"role": "user", "content": context},
+            ],
+            temperature=0.1,
+        )
+        return {"context": context, "output": output}
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 

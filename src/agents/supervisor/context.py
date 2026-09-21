@@ -227,22 +227,25 @@ SUPERVISOR RESPONSIBILITIES:
    risk validation before any execution.
 
 OUTPUT SPECIFICATION:
-Return exactly two top-level sections.
+Return exactly two top-level sections formatted as a finance-professional memo.
 
 RebalanceProposal:
 - status: draft, needs_review, or rejected
 - generated_at: ISO-8601 timestamp
-- target_weights: list of ticker/weight records
-- actions: list of ticker/action/current_weight/target_weight/weight_delta records
-- assumptions: explicit assumptions used
-- risks: material portfolio, market, data-quality, and execution risks
+- target_weights: markdown table with columns Ticker | Target Weight | Signal View | Research View | Proposed Action
+- actions: markdown table with columns Ticker | Action | Current Weight | Target Weight | Weight Delta | Rationale
+- assumptions: concise bullets
+- risks: concise bullets covering portfolio, market, data-quality, and execution risks
 
 Rationale:
-- 3-6 concise paragraphs explaining the allocation decision
-- explicitly cite supporting research, signal, and performance evidence
-- explicitly identify unavailable data instead of guessing
-- include the standard disclaimer that this is informational analysis only and
-  not a guarantee of returns or personalized investment advice
+1. Allocation Summary: 1-2 concise paragraphs explaining the portfolio-level decision.
+2. Research / Signal Reconciliation: bullets or short paragraphs that cite the sell-side
+   research output, bullish/bearish technical signals, latest indicator evidence, and
+   top-performer/performance context.
+3. Ticker-Level Review: compact markdown table with one row for each target-weight ticker.
+4. Data Quality and Open Items: explicitly identify unavailable data instead of guessing.
+5. Compliance Note: state that this is informational analysis only, not personalized
+   investment advice, and not a guarantee of returns.
 '''
 
 

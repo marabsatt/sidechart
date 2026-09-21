@@ -5,7 +5,7 @@ Pipeline flow:
 1. market_data → gather OHLCV data for multiple tickers
 2. signals → identify bullish/bearish tickers
 3. portfolio → calculate returns for bullish tickers, select top performers
-4. risk → optimize portfolio weights using the top performers
+4. risk → optimize portfolio weights using the active universe
 5. execution → execute trades using the calculated weights
 """
 
@@ -45,8 +45,9 @@ def run_analysis_pipeline(
     
     # Step 1: Gather market data
     print("Step 1: Gathering market data...")
-    start_date = (datetime.now() - timedelta(days=lookback_days)).strftime('%Y-%m-%d')
-    market_data = get_market_data(tickers, start_date=start_date)
+    signal_lookback_days = max(lookback_days, 120)
+    start_date = (datetime.now() - timedelta(days=signal_lookback_days)).strftime('%Y-%m-%d')
+    market_data = get_market_data(tickers, start_date=start_date, interval='1d')
     
     if market_data.empty:
         print("Error: No market data retrieved")
@@ -63,18 +64,16 @@ def run_analysis_pipeline(
     print(f"  Bullish tickers: {len(bullish_tickers)}")
     print(f"  Bearish tickers: {len(bearish_tickers)}")
     
-    if not bullish_tickers:
-        print("Warning: No bullish signals found")
-        return {
-            'status': 'partial',
-            'bullish_tickers': [],
-            'bearish_tickers': bearish_tickers,
-            'weights': pd.DataFrame(columns=['ticker', 'weights'])
-        }
+    signal_fallback = False
+    candidate_tickers = bullish_tickers
+    if not candidate_tickers:
+        print("Warning: No bullish signals found; using supplied universe as fallback candidates")
+        candidate_tickers = list(tickers)
+        signal_fallback = True
     
     # Step 3: Calculate returns for bullish tickers
     print("Step 3: Calculating returns for bullish tickers...")
-    top_performers = get_top_performers(bullish_tickers, keep=num_signals, lookback_days=lookback_days)
+    top_performers = get_top_performers(candidate_tickers, keep=num_signals, lookback_days=lookback_days)
     print(f"  Top {len(top_performers)} performers selected")
     
     if not top_performers:
@@ -83,18 +82,26 @@ def run_analysis_pipeline(
             'status': 'partial',
             'bullish_tickers': bullish_tickers,
             'bearish_tickers': bearish_tickers,
+            'candidate_tickers': candidate_tickers,
+            'signal_fallback': signal_fallback,
+            'market_data': market_data,
+            'signals_data': signals_df,
             'weights': pd.DataFrame(columns=['ticker', 'weights'])
         }
     
-    # Step 4: Calculate portfolio weights
+    # Step 4: Calculate portfolio weights for the active universe.
     print("Step 4: Calculating portfolio weights...")
-    weights_df = port_opt(top_performers, lookback_days=lookback_days)
+    allocation_tickers = list(dict.fromkeys(tickers))
+    weights_df = port_opt(allocation_tickers, lookback_days=lookback_days)
     print(f"  Calculated weights for {len(weights_df)} tickers")
     
     return {
-        'status': 'success',
+        'status': 'fallback' if signal_fallback else 'success',
         'bullish_tickers': bullish_tickers,
         'bearish_tickers': bearish_tickers,
+        'candidate_tickers': candidate_tickers,
+        'signal_fallback': signal_fallback,
+        'allocation_tickers': allocation_tickers,
         'top_performers': top_performers,
         'market_data': market_data,
         'signals_data': signals_df,

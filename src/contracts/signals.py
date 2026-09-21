@@ -1,6 +1,16 @@
 import pandas as pd
 import numpy as np
 
+FAST_RSI_PERIOD = 5
+SLOW_RSI_PERIOD = 15
+FAST_EMA_PERIOD = 5
+SLOW_EMA_PERIOD = 15
+MACD_FAST_PERIOD = 12
+MACD_SLOW_PERIOD = 26
+MACD_SIGNAL_PERIOD = 9
+MIN_SIGNAL_ROWS = MACD_SLOW_PERIOD + MACD_SIGNAL_PERIOD - 1
+
+
 def rsi(data: pd.Series, periods: int) -> pd.Series:
     '''
     Function that calculates the Relative Strength Index (RSI) for a given pandas series.
@@ -84,45 +94,100 @@ def signal_generator(market_data: pd.DataFrame) -> tuple:
     '''
     if market_data.empty:
         return [], [], pd.DataFrame()
+
+    required_columns = {'ticker', 'date', 'close'}
+    missing_columns = required_columns.difference(market_data.columns)
+    if missing_columns:
+        raise ValueError(f"market_data missing required columns: {sorted(missing_columns)}")
     
     bullish_tickers = []
     bearish_tickers = []
     signals_list = []
+
+    prepared_data = market_data.copy()
+    prepared_data['close'] = pd.to_numeric(prepared_data['close'], errors='coerce')
+    if 'volume' in prepared_data.columns:
+        prepared_data['volume'] = pd.to_numeric(prepared_data['volume'], errors='coerce')
+    else:
+        prepared_data['volume'] = np.nan
     
     # Process each ticker separately
-    for ticker in market_data['ticker'].unique():
-        ticker_data = market_data[market_data['ticker'] == ticker].copy()
+    for ticker in prepared_data['ticker'].dropna().unique():
+        ticker_data = prepared_data[prepared_data['ticker'] == ticker].copy()
         ticker_data = ticker_data.sort_values('date')
+        ticker_data = ticker_data.dropna(subset=['close'])
         
-        if len(ticker_data) < 15:  # Need minimum data for indicators
+        if len(ticker_data) < MIN_SIGNAL_ROWS:
+            ticker_data['_Signal'] = 'bearish'
+            bearish_tickers.append(ticker)
+            signals_list.append(ticker_data)
             continue
         
         try:
             # Calculate indicators
-            ticker_data['_FAST_RSI'] = rsi(ticker_data['close'], periods=5)
-            ticker_data['_SLOW_RSI'] = rsi(ticker_data['close'], periods=15)
-            ticker_data['_MACD'], ticker_data['_Signal_Line'], ticker_data['_MACD_Hist'] = macd(ticker_data['close'])
-            ticker_data['_EMA_5'] = ema(ticker_data['close'], period=5)
-            ticker_data['_EMA_15'] = ema(ticker_data['close'], period=15)
+            ticker_data['_FAST_RSI'] = rsi(ticker_data['close'], periods=FAST_RSI_PERIOD)
+            ticker_data['_SLOW_RSI'] = rsi(ticker_data['close'], periods=SLOW_RSI_PERIOD)
+            ticker_data['_MACD'], ticker_data['_Signal_Line'], ticker_data['_MACD_Hist'] = macd(
+                ticker_data['close'],
+                fast_period=MACD_FAST_PERIOD,
+                slow_period=MACD_SLOW_PERIOD,
+                signal_period=MACD_SIGNAL_PERIOD,
+            )
+            ticker_data['_EMA_5'] = ema(ticker_data['close'], period=FAST_EMA_PERIOD)
+            ticker_data['_EMA_15'] = ema(ticker_data['close'], period=SLOW_EMA_PERIOD)
             ticker_data['_prev_volume'] = ticker_data['volume'].shift(1)
             ticker_data['_avg_volume_3m'] = ticker_data['volume'].ewm(span=3, adjust=False).mean()
             
             # Get the latest row
             latest = ticker_data.iloc[-1]
             prev = ticker_data.iloc[-2] if len(ticker_data) > 1 else ticker_data.iloc[-1]
+
+            indicator_columns = [
+                '_EMA_5',
+                '_EMA_15',
+                '_FAST_RSI',
+                '_SLOW_RSI',
+                '_MACD',
+                '_Signal_Line',
+                '_MACD_Hist',
+                'close',
+            ]
+            has_indicators = all(pd.notna(latest[column]) for column in indicator_columns)
             
             # Determine if the stock is bullish based on technical indicators
-            is_bullish = (
-                (latest['_EMA_5'] > latest['_EMA_15']) and  # Short term bullish trend
-                (latest['_FAST_RSI'] > latest['_SLOW_RSI']) and  # Upward momentum
-                (latest['_MACD'] > latest['_Signal_Line']) and  # MACD positive
-                (latest['_MACD_Hist'] > 0) and  # Histogram positive
-                (latest['close'] > prev['close']) and  # Price increasing
-                (latest['volume'] > latest['_avg_volume_3m'])  # Volume confirmation
+            trend_confirmation = latest['_EMA_5'] > latest['_EMA_15']
+            rsi_confirmation = (
+                latest['_FAST_RSI'] >= latest['_SLOW_RSI'] and
+                latest['_FAST_RSI'] > 50
             )
+            macd_confirmation = (
+                latest['_MACD'] > latest['_Signal_Line'] and
+                latest['_MACD_Hist'] > 0
+            )
+            price_confirmation = latest['close'] > prev['close']
+            volume_confirmation = (
+                pd.notna(latest['volume']) and
+                pd.notna(latest['_avg_volume_3m']) and
+                latest['volume'] >= latest['_avg_volume_3m']
+            )
+            confirmation_count = sum(
+                [
+                    rsi_confirmation,
+                    macd_confirmation,
+                    volume_confirmation,
+                ]
+            )
+            is_bullish = (
+                has_indicators and
+                trend_confirmation and
+                price_confirmation and
+                confirmation_count >= 2
+            )
+            ticker_data['_Signal'] = 'bearish'
             
             if is_bullish:
                 bullish_tickers.append(ticker)
+                ticker_data.loc[ticker_data.index[-1], '_Signal'] = 'bullish'
             else:
                 bearish_tickers.append(ticker)
             
