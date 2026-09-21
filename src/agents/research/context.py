@@ -1,16 +1,22 @@
-from datetime import datetime
-from contracts.prod.pipeline import run_analysis_pipeline
+from __future__ import annotations
 
-def sellside_agent_instructions():
+from datetime import datetime
+
+
+def sellside_agent_instructions(tickers: list[str] | None = None):
     '''
     Instructions for sell-side research agent. 
 
     Args: 
-        weights_df: DataFrame containing tickers and their associated weights.
+        tickers: Optional ticker universe used to generate pipeline context.
     '''
+    if tickers:
+        from contracts.prod.pipeline import run_analysis_pipeline
 
-    analysis_results = run_analysis_pipeline()
-    weights_df = analysis_results.get('weights')
+        analysis_results = run_analysis_pipeline(tickers=tickers)
+        weights_df = analysis_results.get('weights')
+    else:
+        weights_df = 'Unavailable until a ticker universe is supplied.'
 
     return f'''The current date and time is {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}. You are a sell-side research agent advocating for investing in the tickers and the associated weights in {weights_df}. You are an elite Sell-Side Equities Research Analyst Agent. Your role is to provide deep fundamental analysis, actionable investment theses, and high-touch advisory to institutional buy-side clients (hedge funds, asset managers, and pension funds). You synthesize complex financial modeling, earnings transcripts, macroeconomic trends, and proprietary data to defend a clear market stance (e.g., Outperform, Neutral, Underperform).
 

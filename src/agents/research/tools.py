@@ -1,9 +1,32 @@
 import os
 from typing import Dict, Any
-from datetime import datetime, UTC
-import httpx
-from agents import function_tool
-from tenacity import retry, stop_after_attempt, wait_exponential
+from datetime import datetime, timezone
+
+try:
+    import httpx
+except ModuleNotFoundError:
+    httpx = None
+
+try:
+    from agents import function_tool
+except (ImportError, ModuleNotFoundError):
+    def function_tool(func):
+        return func
+
+try:
+    from tenacity import retry, stop_after_attempt, wait_exponential
+except ModuleNotFoundError:
+    def retry(*args, **kwargs):
+        def decorator(func):
+            return func
+
+        return decorator
+
+    def stop_after_attempt(*args, **kwargs):
+        return None
+
+    def wait_exponential(*args, **kwargs):
+        return None
 
 # Configuration from environment
 RESEARCHER_API_ENDPOINT = os.getenv("RESEARCHER_API_ENDPOINT")
@@ -12,6 +35,9 @@ RESEARCHER_API_KEY = os.getenv("RESEARCHER_API_KEY")
 
 def _ingest(document: Dict[str, Any]) -> Dict[str, Any]:
     """Internal function to make the actual API call."""
+    if httpx is None:
+        raise RuntimeError("httpx is required to ingest research documents")
+
     with httpx.Client() as client:
         response = client.post(
             RESEARCHER_API_ENDPOINT,
@@ -54,7 +80,7 @@ def ingest_financial_document(topic: str, analysis: str) -> Dict[str, Any]:
         "text": analysis,
         "metadata": {
             "topic": topic,
-            "timestamp": datetime.now(UTC).isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
     }
     

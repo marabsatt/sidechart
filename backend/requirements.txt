@@ -3,3 +3,12 @@ uvicorn
 openai
 python-dotenv
 python-multipart
+pandas
+numpy
+requests
+beautifulsoup4
+yfinance
+ib-insync
+nest-asyncio
+riskfolio-lib
+massive

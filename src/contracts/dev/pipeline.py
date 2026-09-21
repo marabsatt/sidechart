@@ -18,7 +18,7 @@ from ib_insync import IB
 from .market_data import get_market_data
 from ..signals import signal_generator
 from .portfolio import get_top_performers
-from ..prod.risk import port_opt
+from .risk import port_opt
 from ..execution import execute_rebalance
 from ..rebalance import RebalanceProposal
 
