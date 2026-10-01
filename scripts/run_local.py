@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -22,9 +24,14 @@ FRONTEND_PORT = 3000
 BACKEND_URL = f"http://127.0.0.1:{BACKEND_PORT}"
 FRONTEND_URL = f"http://localhost:{FRONTEND_PORT}"
 processes: list[subprocess.Popen[str]] = []
+temporary_frontend: tempfile.TemporaryDirectory[str] | None = None
 
 
-def cleanup(signum: int | None = None, frame: object | None = None) -> None:
+def cleanup(
+    signum: int | None = None,
+    frame: object | None = None,
+    exit_code: int = 0,
+) -> None:
     """Terminate all subprocesses before exiting."""
     print("\nShutting down services...")
     for proc in processes:
@@ -37,7 +44,9 @@ def cleanup(signum: int | None = None, frame: object | None = None) -> None:
             proc.kill()
         except Exception:
             proc.kill()
-    sys.exit(0)
+    if temporary_frontend is not None:
+        temporary_frontend.cleanup()
+    sys.exit(exit_code)
 
 
 signal.signal(signal.SIGINT, cleanup)
@@ -97,30 +106,45 @@ def check_env_files() -> None:
         print("  note: backend runs without .env, but chat/data-provider features may need keys")
 
 
-def ensure_frontend_writable() -> None:
+def prepare_frontend() -> Path:
+    global temporary_frontend
+
     frontend_dir = PROJECT_ROOT / "frontend"
     next_dir = frontend_dir / ".next"
 
-    if not os.access(frontend_dir, os.W_OK):
-        raise SystemExit(
-            "\nfrontend/ is not writable. Fix ownership before running local dev:\n"
-            '  sudo chown -R "$USER":staff frontend'
-        )
+    if os.access(frontend_dir, os.W_OK) and (
+        not next_dir.exists() or os.access(next_dir, os.W_OK)
+    ):
+        return frontend_dir
 
-    if next_dir.exists() and not os.access(next_dir, os.W_OK):
-        raise SystemExit(
-            "\nfrontend/.next is not writable. Fix ownership before running local dev:\n"
-            '  sudo chown -R "$USER":staff frontend/.next'
-        )
+    temporary_frontend = tempfile.TemporaryDirectory(prefix="sidechart-frontend-")
+    working_dir = Path(temporary_frontend.name)
+    shutil.copytree(
+        frontend_dir,
+        working_dir,
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns("node_modules", ".next"),
+    )
+    node_modules = frontend_dir / "node_modules"
+    if node_modules.exists():
+        (working_dir / "node_modules").symlink_to(node_modules, target_is_directory=True)
+    print(f"Frontend is read-only; running a writable copy at {working_dir}")
+    return working_dir
 
 
-def wait_for_url(url: str, timeout_seconds: int) -> bool:
+def wait_for_url(
+    url: str,
+    timeout_seconds: int,
+    proc: subprocess.Popen[str],
+) -> bool:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            return False
         try:
             request = Request(url, headers={"User-Agent": "sidechart-local-runner"})
             with urlopen(request, timeout=2) as response:
-                if 200 <= response.status < 500:
+                if proc.poll() is None and 200 <= response.status < 500:
                     return True
         except URLError:
             time.sleep(0.5)
@@ -162,9 +186,7 @@ def start_backend() -> subprocess.Popen[str]:
     proc = start_process(
         "backend",
         [
-            "uv",
-            "run",
-            "python",
+            sys.executable,
             "-m",
             "uvicorn",
             "backend.server:app",
@@ -176,18 +198,18 @@ def start_backend() -> subprocess.Popen[str]:
         cwd=PROJECT_ROOT,
     )
 
-    if wait_for_url(f"{BACKEND_URL}/health", timeout_seconds=30):
+    if wait_for_url(f"{BACKEND_URL}/health", timeout_seconds=30, proc=proc):
         print(f"Backend running at {BACKEND_URL}")
         print(f"API docs: {BACKEND_URL}/docs")
         return proc
 
     print("Backend failed to start.")
-    cleanup()
+    cleanup(exit_code=1)
     return proc
 
 
 def start_frontend() -> subprocess.Popen[str]:
-    frontend_dir = PROJECT_ROOT / "frontend"
+    frontend_dir = prepare_frontend()
     print("\nStarting Next.js frontend...")
 
     if not (frontend_dir / "node_modules").exists():
@@ -197,19 +219,23 @@ def start_frontend() -> subprocess.Popen[str]:
     env = os.environ.copy()
     env.setdefault("NEXT_PUBLIC_API_BASE_URL", BACKEND_URL)
 
+    command = ["npm", "run", "dev", "--", "--hostname", "localhost", "--port", str(FRONTEND_PORT)]
+    if frontend_dir != PROJECT_ROOT / "frontend":
+        command.append("--webpack")
+
     proc = start_process(
         "frontend",
-        ["npm", "run", "dev", "--", "--hostname", "localhost", "--port", str(FRONTEND_PORT)],
+        command,
         cwd=frontend_dir,
         env=env,
     )
 
-    if wait_for_url(FRONTEND_URL, timeout_seconds=45):
+    if wait_for_url(FRONTEND_URL, timeout_seconds=45, proc=proc):
         print(f"Frontend running at {FRONTEND_URL}")
         return proc
 
     print("Frontend failed to start.")
-    cleanup()
+    cleanup(exit_code=1)
     return proc
 
 
@@ -227,7 +253,7 @@ def monitor_processes() -> None:
         for proc in processes:
             if proc.poll() is not None:
                 print("\nA service stopped unexpectedly.")
-                cleanup()
+                cleanup(exit_code=proc.returncode or 1)
         time.sleep(0.5)
 
 
@@ -246,7 +272,6 @@ def main() -> None:
     if not args.skip_checks:
         check_requirements()
         check_env_files()
-        ensure_frontend_writable()
 
     start_backend()
     start_frontend()

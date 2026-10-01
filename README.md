@@ -193,8 +193,11 @@ npm install
 Run the backend and frontend together:
 
 ```bash
-python scripts/run_local.py
+uv run run_local.py
 ```
+
+If `frontend/` is read-only, the runner uses a temporary writable copy with
+webpack. Restart the runner after editing frontend source files in this mode.
 
 The local runner starts:
 
@@ -207,7 +210,7 @@ API docs: http://127.0.0.1:8000/docs
 You can skip prerequisite checks with:
 
 ```bash
-python scripts/run_local.py --skip-checks
+uv run run_local.py --skip-checks
 ```
 
 ## Environment Variables
