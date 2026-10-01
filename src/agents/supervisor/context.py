@@ -38,7 +38,17 @@ def _format_dataframe(value: Any, max_rows: int = MAX_CONTEXT_ROWS) -> str:
     df = _coerce_dataframe(value)
     if df.empty:
         return 'Unavailable'
-    return df.head(max_rows).to_string(index=False)
+    displayed = df.head(max_rows).fillna('Unavailable').astype(str)
+    headers = [str(column).replace('|', r'\|') for column in displayed.columns]
+    rows = [
+        [cell.replace('|', r'\|').replace('\n', ' ') for cell in row]
+        for row in displayed.itertuples(index=False, name=None)
+    ]
+    return '\n'.join([
+        '| ' + ' | '.join(headers) + ' |',
+        '| ' + ' | '.join(['---'] * len(headers)) + ' |',
+        *['| ' + ' | '.join(row) + ' |' for row in rows],
+    ])
 
 
 def _latest_signals(signals_data: Any) -> pd.DataFrame:
@@ -188,32 +198,36 @@ def supervisor_agent(
         current_positions=current_positions,
     )
 
-    return f'''The current date and time is {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}.
+    return f'''# Supervisor Review Context
+
+The current date and time is {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}.
 You are the SideChart supervisor agent coordinating a rebalance and research cycle.
 
-MISSION:
+## Mission
 Synthesize the sell-side research output, technical signals, portfolio performance, current holdings, and optimizer weights into one explainable draft rebalance. You do not execute trades. You produce a human-reviewable RebalanceProposal and a concise rationale for why the allocation should be accepted, modified, or rejected.
 
-INPUTS:
-1. Sell-side research agent output:
+## Inputs
+### Sell-side research agent output
 {research_context}
 
-2. Draft target weights from contracts.risk.port_opt via contracts.pipeline.run_analysis_pipeline:
+### Draft target weights
 {_format_dataframe(proposal.target_weights)}
 
-3. Signal summary from contracts.signals.signal_generator:
-Status: {proposal.source_signals['status']}
-Bullish tickers: {proposal.source_signals['bullish_tickers']}
-Bearish tickers: {proposal.source_signals['bearish_tickers']}
-Latest indicator snapshot:
+### Signal summary
+- Status: {proposal.source_signals['status']}
+- Bullish tickers: {', '.join(proposal.source_signals['bullish_tickers']) or 'Unavailable'}
+- Bearish tickers: {', '.join(proposal.source_signals['bearish_tickers']) or 'Unavailable'}
+
+### Latest indicator snapshot
 {_format_dataframe(latest_signals)}
 
-4. Portfolio/performance snapshot from contracts.portfolio and market data:
-Top performers: {proposal.source_signals['top_performers']}
+### Portfolio and performance snapshot
+Top performers: {', '.join(proposal.source_signals['top_performers']) or 'Unavailable'}
+
 Current positions plus lookback performance:
 {_format_dataframe(performance_snapshot)}
 
-SUPERVISOR RESPONSIBILITIES:
+## Supervisor Responsibilities
 1. Reconcile research and signals. Flag tickers where fundamental research
    conflicts with technical momentum or portfolio performance.
 2. Explain proposed allocation. Reference target weights, current exposures,
@@ -226,7 +240,7 @@ SUPERVISOR RESPONSIBILITIES:
 5. Preserve paper-trading guardrails. The proposal is advisory and must pass
    risk validation before any execution.
 
-OUTPUT SPECIFICATION:
+## Output Specification
 Return exactly two top-level sections formatted as a finance-professional memo.
 
 RebalanceProposal:

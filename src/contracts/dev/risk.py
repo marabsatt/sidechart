@@ -49,6 +49,14 @@ def _complete_weights(weights_df: pd.DataFrame, tickers: list) -> pd.DataFrame:
         return _equal_weights(tickers)
 
     complete_df['weights'] = complete_df['weights'] / total_weight
+    minimum_weight = min(0.01, 0.5 / len(tickers))
+    excess = (complete_df['weights'] - minimum_weight).clip(lower=0.0)
+    if excess.sum() <= 0:
+        return _equal_weights(tickers)
+    complete_df['weights'] = (
+        minimum_weight
+        + (1.0 - minimum_weight * len(tickers)) * excess / excess.sum()
+    )
     return complete_df.sort_values(['weights', 'ticker'], ascending=[False, True]).reset_index(drop=True)
 
 
@@ -123,7 +131,6 @@ def port_opt(tickers: list, lookback_days: int = 30) -> pd.DataFrame:
             'weights': weights.values.flatten()
         })
         
-        weights_df.loc[weights_df['weights'] < 0.01, 'weights'] = 0.0
         return _complete_weights(weights_df, tickers)
     
     except Exception as e:

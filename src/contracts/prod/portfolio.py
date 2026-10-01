@@ -75,3 +75,45 @@ def get_top_performers(bullish_tickers: list, keep: int = 20, lookback_days: int
     except Exception as e:
         print(f'Error calculating top performers: {e}')
         return bullish_tickers[:keep]
+
+
+def get_top_monthly_performers(tickers: list, keep: int = 20) -> list:
+    '''
+    Rank tickers by their latest month-over-month close return.
+
+    Args:
+        tickers (list): Candidate ticker symbols, usually bullish tickers.
+        keep (int): Maximum number of top performers to return.
+
+    Returns:
+        list: Tickers sorted by latest monthly return, highest first.
+    '''
+    if not tickers or keep <= 0:
+        return []
+
+    try:
+        market_data = get_market_data(tickers, period='6mo', interval='1mo')
+        if market_data.empty:
+            return tickers[:keep]
+
+        returns_data = {}
+        for ticker in tickers:
+            ticker_data = market_data[market_data['ticker'] == ticker].copy()
+            if ticker_data.empty:
+                continue
+            ticker_data = ticker_data.sort_values('date').dropna(subset=['close'])
+            if len(ticker_data) < 2:
+                continue
+
+            previous_close = ticker_data['close'].iloc[-2]
+            latest_close = ticker_data['close'].iloc[-1]
+            if previous_close > 0:
+                returns_data[ticker] = (latest_close - previous_close) / previous_close
+
+        sorted_tickers = sorted(returns_data.items(), key=lambda item: item[1], reverse=True)
+        top_tickers = [ticker for ticker, _ in sorted_tickers[:keep]]
+
+        return top_tickers if top_tickers else tickers[:keep]
+    except Exception as e:
+        print(f'Error calculating monthly top performers: {e}')
+        return tickers[:keep]

@@ -75,3 +75,51 @@ def get_top_performers(bullish_tickers: list, keep: int = 20, lookback_days: int
     except Exception as e:
         print(f'Error calculating top performers: {e}')
         return bullish_tickers[:keep]
+
+
+def get_top_monthly_performers(
+    tickers: list, keep: int = 20, market_data: pd.DataFrame | None = None
+) -> list:
+    '''
+    Rank tickers by their latest month-over-month close return.
+
+    Args:
+        tickers (list): Candidate ticker symbols, usually bullish tickers.
+        keep (int): Maximum number of top performers to return.
+
+    Returns:
+        list: Tickers sorted by latest monthly return, highest first.
+    '''
+    if not tickers or keep <= 0:
+        return []
+
+    try:
+        if market_data is None:
+            market_data = get_market_data(tickers, period='6mo', interval='1mo')
+        if market_data.empty:
+            return []
+
+        returns_data = {}
+        for ticker in tickers:
+            ticker_data = market_data[market_data['ticker'] == ticker].copy()
+            if ticker_data.empty:
+                continue
+            ticker_data['date'] = pd.to_datetime(ticker_data['date'], errors='coerce')
+            ticker_data['close'] = pd.to_numeric(ticker_data['close'], errors='coerce')
+            ticker_data = ticker_data.dropna(subset=['date', 'close']).sort_values('date')
+            monthly_closes = ticker_data.groupby(ticker_data['date'].dt.to_period('M'))['close'].last()
+            if len(monthly_closes) < 2:
+                continue
+
+            previous_close = monthly_closes.iloc[-2]
+            latest_close = monthly_closes.iloc[-1]
+            if previous_close > 0:
+                returns_data[ticker] = (latest_close - previous_close) / previous_close
+
+        sorted_tickers = sorted(returns_data.items(), key=lambda item: item[1], reverse=True)
+        top_tickers = [ticker for ticker, _ in sorted_tickers[:keep]]
+
+        return top_tickers
+    except Exception as e:
+        print(f'Error calculating monthly top performers: {e}')
+        return []

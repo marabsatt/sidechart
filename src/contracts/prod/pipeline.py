@@ -17,7 +17,7 @@ from ib_insync import IB
 
 from .market_data import get_market_data
 from ..signals import signal_generator
-from .portfolio import get_top_performers
+from .portfolio import get_top_monthly_performers
 from .risk import port_opt
 from ..execution import execute_rebalance
 from ..rebalance import RebalanceProposal
@@ -72,9 +72,9 @@ def run_analysis_pipeline(
             'weights': pd.DataFrame(columns=['ticker', 'weights'])
         }
     
-    # Step 3: Calculate returns for bullish tickers
-    print("Step 3: Calculating returns for bullish tickers...")
-    top_performers = get_top_performers(bullish_tickers, keep=num_signals, lookback_days=lookback_days)
+    # Step 3: Rank bullish tickers by latest monthly return.
+    print("Step 3: Ranking bullish tickers by latest monthly return...")
+    top_performers = get_top_monthly_performers(bullish_tickers, keep=num_signals)
     print(f"  Top {len(top_performers)} performers selected")
     
     if not top_performers:
@@ -95,6 +95,7 @@ def run_analysis_pipeline(
         'status': 'success',
         'bullish_tickers': bullish_tickers,
         'bearish_tickers': bearish_tickers,
+        'allocation_tickers': top_performers,
         'top_performers': top_performers,
         'market_data': market_data,
         'signals_data': signals_df,

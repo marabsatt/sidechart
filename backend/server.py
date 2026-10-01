@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import math
 import os
 import sys
 import uuid
 from datetime import date, datetime
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from time import monotonic
 from typing import Any, Dict, List, Literal, Optional
 
 from dotenv import load_dotenv
@@ -61,6 +64,21 @@ market data, signals, draft allocations, and research context, but you do not
 guarantee returns or present informational analysis as personalized investment
 advice.
 """
+
+IB_CONNECTION: Optional[Any] = None
+IB_CONNECTION_DETAILS: dict[str, Any] = {}
+IB_CONNECTION_LOCK = asyncio.Lock()
+DEFAULT_IB_PORTS = list(
+    dict.fromkeys(
+        [
+            int(os.getenv("IB_PORT", "7497")),
+            7497,
+            4002,
+            7496,
+            4001,
+        ]
+    )
+)
 
 
 def _get_openai_client() -> Any:
@@ -205,6 +223,8 @@ def _trade_to_record(trade: Any) -> dict[str, Any]:
         "exchange": getattr(contract, "exchange", None),
         "currency": getattr(contract, "currency", None),
         "action": getattr(order, "action", None),
+        "order_id": getattr(order, "orderId", None),
+        "perm_id": getattr(order, "permId", None),
         "order_type": getattr(order, "orderType", None),
         "quantity": getattr(order, "totalQuantity", None),
         "tif": getattr(order, "tif", None),
@@ -212,6 +232,91 @@ def _trade_to_record(trade: Any) -> dict[str, Any]:
         "filled": getattr(status, "filled", None),
         "remaining": getattr(status, "remaining", None),
         "avg_fill_price": getattr(status, "avgFillPrice", None),
+    }
+
+
+async def _await_order_acknowledgment(trade: Any, timeout: float = 8.0) -> None:
+    deadline = monotonic() + timeout
+    while getattr(trade.orderStatus, "status", "") in {"", "PendingSubmit"}:
+        if monotonic() >= deadline:
+            return
+        await asyncio.sleep(0.2)
+
+    if trade.orderStatus.status in {"Inactive", "Cancelled", "ApiCancelled"}:
+        log = getattr(trade, "log", [])
+        reason = getattr(log[-1], "message", "") if log else ""
+        raise RuntimeError(f"IBKR rejected the order: {reason or trade.orderStatus.status}")
+
+
+def _account_net_liquidation(ib: Any) -> float:
+    account_values = ib.accountValues()
+    net_liquidation = next(
+        (
+            value.value
+            for value in account_values
+            if value.tag == "NetLiquidation" and value.currency in {"USD", "BASE"}
+        ),
+        None,
+    )
+    if net_liquidation is None:
+        raise ValueError("Could not determine NetLiquidation from IBKR account")
+
+    account_value = float(net_liquidation)
+    if account_value <= 0:
+        raise ValueError("IBKR NetLiquidation must be greater than zero")
+    return account_value
+
+
+async def _latest_ib_price(ib: Any, ticker: str) -> float:
+    from ib_insync import Stock
+
+    contract = Stock(ticker, "SMART", "USD")
+    qualified = await ib.qualifyContractsAsync(contract)
+    if qualified:
+        contract = qualified[0]
+
+    ib.reqMarketDataType(3)
+    market_ticker = (await ib.reqTickersAsync(contract))[0]
+    price = market_ticker.marketPrice()
+    if price is None or not math.isfinite(price) or price <= 0:
+        price_candidates = [
+            market_ticker.last,
+            market_ticker.close,
+            market_ticker.bid,
+            market_ticker.ask,
+        ]
+        valid_prices = [
+            float(value) for value in price_candidates
+            if value is not None and math.isfinite(value) and value > 0
+        ]
+        if market_ticker.bid and market_ticker.ask and market_ticker.bid > 0 and market_ticker.ask > 0:
+            valid_prices.insert(0, (float(market_ticker.bid) + float(market_ticker.ask)) / 2)
+        if not valid_prices:
+            raise ValueError(f"Could not determine a market price for {ticker}")
+        price = valid_prices[0]
+
+    return float(price)
+
+
+async def _weighted_order_quantity(ib: Any, ticker: str, target_weight: float) -> dict[str, float]:
+    if target_weight <= 0:
+        raise ValueError("target_weight must be greater than zero")
+
+    await ib.accountSummaryAsync()
+    account_value = _account_net_liquidation(ib)
+    market_price = await _latest_ib_price(ib, ticker)
+    target_notional = account_value * target_weight
+    quantity = math.floor(target_notional / market_price)
+    if quantity <= 0:
+        raise ValueError(
+            f"Target notional ${target_notional:,.2f} is below one share of {ticker} at ${market_price:,.2f}"
+        )
+
+    return {
+        "account_value": account_value,
+        "market_price": market_price,
+        "target_notional": target_notional,
+        "quantity": float(quantity),
     }
 
 
@@ -227,12 +332,78 @@ def _position_to_record(position: Any) -> dict[str, Any]:
     }
 
 
-def _connect_ib(host: str, port: int, client_id: int):
+def _connect_ib(host: str, port: int, client_id: int, timeout: float = 4.0):
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
     from ib_insync import IB
 
     ib = IB()
-    ib.connect(host, port, clientId=client_id)
+    ib.connect(host, port, clientId=client_id, timeout=timeout)
     return ib
+
+
+def _ib_connection_status() -> dict[str, Any]:
+    connected = bool(IB_CONNECTION and IB_CONNECTION.isConnected())
+    return {
+        "connected": connected,
+        "host": IB_CONNECTION_DETAILS.get("host"),
+        "port": IB_CONNECTION_DETAILS.get("port"),
+        "client_id": IB_CONNECTION_DETAILS.get("client_id"),
+        "connected_at": IB_CONNECTION_DETAILS.get("connected_at"),
+        "mode": IB_CONNECTION_DETAILS.get("mode"),
+    }
+
+
+async def _connect_shared_ib(
+    host: str,
+    port: int,
+    client_id: int,
+    timeout: float = 4.0,
+) -> dict[str, Any]:
+    global IB_CONNECTION
+    global IB_CONNECTION_DETAILS
+
+    async with IB_CONNECTION_LOCK:
+        if IB_CONNECTION and IB_CONNECTION.isConnected():
+            same_target = (
+                IB_CONNECTION_DETAILS.get("host") == host
+                and IB_CONNECTION_DETAILS.get("port") == port
+                and IB_CONNECTION_DETAILS.get("client_id") == client_id
+            )
+            if same_target:
+                return _ib_connection_status()
+            IB_CONNECTION.disconnect()
+        ib = None
+        try:
+            asyncio.set_event_loop(asyncio.get_running_loop())
+            from ib_insync import IB
+
+            ib = IB()
+            await ib.connectAsync(host, port, clientId=client_id, timeout=timeout)
+        except Exception:
+            if ib is not None and ib.isConnected():
+                ib.disconnect()
+            raise
+
+        IB_CONNECTION = ib
+        IB_CONNECTION_DETAILS = {
+            "host": host,
+            "port": port,
+            "client_id": client_id,
+            "connected_at": datetime.utcnow().isoformat(),
+            "mode": "IBKR Gateway" if port in {4001, 4002} else "Trader Workstation",
+        }
+        return _ib_connection_status()
+
+
+async def _get_order_ib(host: str, port: int, client_id: int) -> Any:
+    if IB_CONNECTION and IB_CONNECTION.isConnected():
+        return IB_CONNECTION
+    await _connect_shared_ib(host, port, client_id)
+    return IB_CONNECTION
 
 
 def _normalize_tickers(tickers: list[str] | None) -> list[str]:
@@ -320,9 +491,17 @@ class BrokerConnectionRequest(BaseModel):
     client_id: int = Field(default=int(os.getenv("IB_CLIENT_ID", "17")), gt=0)
 
 
+class BrokerConnectRequest(BrokerConnectionRequest):
+    ports: Optional[list[int]] = None
+    timeout: float = Field(default=30.0, gt=0)
+    connect_timeout: float = Field(default=4.0, gt=0)
+    poll_interval: float = Field(default=1.0, gt=0)
+
+
 class OrderRequest(BrokerConnectionRequest):
     ticker: str
     quantity: Optional[float] = Field(default=None, gt=0)
+    target_weight: Optional[float] = Field(default=None, gt=0)
     dry_run: bool = True
 
 
@@ -380,6 +559,45 @@ async def root():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.get("/broker/ibkr/status")
+async def get_ibkr_connection_status():
+    return _ib_connection_status()
+
+
+@app.post("/broker/ibkr/connect")
+async def connect_ibkr(request: BrokerConnectRequest):
+    deadline = monotonic() + request.timeout
+    errors: list[str] = []
+    ports = list(dict.fromkeys(request.ports or DEFAULT_IB_PORTS))
+
+    while True:
+        for port in ports:
+            try:
+                status = await _connect_shared_ib(
+                    request.host,
+                    port,
+                    request.client_id,
+                    request.connect_timeout,
+                )
+                return {
+                    **status,
+                    "message": f"Connected to {status['mode']} on {request.host}:{port}.",
+                }
+            except Exception as exc:
+                errors.append(f"{request.host}:{port} - {exc}")
+
+        if monotonic() >= deadline:
+            raise HTTPException(
+                status_code=504,
+                detail=(
+                    "Timed out waiting for IBKR Trader Workstation or Gateway. "
+                    f"Attempts: {'; '.join(errors[-len(ports):])}"
+                ),
+            )
+
+        await asyncio.sleep(min(request.poll_interval, max(0.1, deadline - monotonic())))
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -562,10 +780,11 @@ async def run_dev_analysis_pipeline(request: PipelineRequest):
     try:
         from contracts.dev.pipeline import run_analysis_pipeline
 
-        result = run_analysis_pipeline(
-            tickers=_normalize_tickers(request.tickers),
-            lookback_days=request.lookback_days,
-            num_signals=request.num_signals,
+        result = await asyncio.to_thread(
+            run_analysis_pipeline,
+            _normalize_tickers(request.tickers),
+            request.lookback_days,
+            request.num_signals,
         )
         return _make_json_safe(result)
     except Exception as exc:
@@ -608,32 +827,62 @@ async def get_dev_current_holdings():
 
 @app.post("/orders/buy")
 async def buy_order(request: OrderRequest):
-    if request.quantity is None:
-        raise HTTPException(status_code=422, detail="quantity is required for buy orders")
+    if request.quantity is None and request.target_weight is None:
+        raise HTTPException(
+            status_code=422,
+            detail="quantity or target_weight is required for buy orders",
+        )
     if request.dry_run:
-        return {
+        preview = {
             "dry_run": True,
             "order": {
                 "action": "BUY",
                 "ticker": request.ticker.upper(),
                 "quantity": request.quantity,
+                "target_weight": request.target_weight,
                 "order_type": "MKT",
                 "tif": "GTC",
             },
         }
+        if request.target_weight is not None and IB_CONNECTION and IB_CONNECTION.isConnected():
+            try:
+                async with IB_CONNECTION_LOCK:
+                    sizing = await _weighted_order_quantity(
+                        IB_CONNECTION, request.ticker.upper(), request.target_weight
+                    )
+                preview["order"]["quantity"] = sizing["quantity"]
+                preview["sizing"] = sizing
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return preview
 
-    ib = None
     try:
         from contracts.orders import buy_stock
 
-        ib = _connect_ib(request.host, request.port, request.client_id)
-        trade = buy_stock(ib, request.ticker.upper(), request.quantity)
-        return {"dry_run": False, "trade": _trade_to_record(trade)}
+        ib = await _get_order_ib(
+            request.host,
+            request.port,
+            request.client_id,
+        )
+        async with IB_CONNECTION_LOCK:
+            sizing = None
+            quantity = request.quantity
+            if quantity is None:
+                sizing = await _weighted_order_quantity(
+                    ib,
+                    request.ticker.upper(),
+                    float(request.target_weight or 0),
+                )
+                quantity = sizing["quantity"]
+            trade = buy_stock(ib, request.ticker.upper(), quantity)
+            await _await_order_acknowledgment(trade)
+
+        response = {"dry_run": False, "trade": _trade_to_record(trade)}
+        if sizing is not None:
+            response["sizing"] = sizing
+        return response
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    finally:
-        if ib is not None and ib.isConnected():
-            ib.disconnect()
 
 
 @app.post("/orders/sell")
@@ -650,18 +899,20 @@ async def sell_order(request: OrderRequest):
             },
         }
 
-    ib = None
     try:
         from contracts.orders import sell_stock
 
-        ib = _connect_ib(request.host, request.port, request.client_id)
-        trade = sell_stock(ib, request.ticker.upper(), request.quantity)
+        ib = await _get_order_ib(
+            request.host,
+            request.port,
+            request.client_id,
+        )
+        async with IB_CONNECTION_LOCK:
+            trade = sell_stock(ib, request.ticker.upper(), request.quantity)
+            await _await_order_acknowledgment(trade)
         return {"dry_run": False, "trade": _trade_to_record(trade)}
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    finally:
-        if ib is not None and ib.isConnected():
-            ib.disconnect()
 
 
 @app.post("/execution/rebalance")
@@ -678,17 +929,24 @@ async def execute_rebalance_endpoint(request: ExecutionRequest):
             "message": "Dry run only. Set dry_run=false to submit paper orders through IBKR.",
         }
 
-    ib = None
     try:
         from contracts.execution import execute_rebalance
 
-        ib = _connect_ib(request.host, request.port, request.client_id)
-        trades = execute_rebalance(
-            ib=ib,
-            target_weights=target_weights,
-            account_value=request.account_value,
-            sell_timeout=request.sell_timeout,
-        )
+        def run_rebalance():
+            client_id = request.client_id + (1 if IB_CONNECTION and IB_CONNECTION.isConnected() else 0)
+            ib = _connect_ib(request.host, request.port, client_id)
+            try:
+                return execute_rebalance(
+                    ib=ib,
+                    target_weights=target_weights,
+                    account_value=request.account_value,
+                    sell_timeout=request.sell_timeout,
+                )
+            finally:
+                if ib.isConnected():
+                    ib.disconnect()
+
+        trades = await asyncio.to_thread(run_rebalance)
         return {
             "dry_run": False,
             "execution_status": "submitted",
@@ -696,9 +954,6 @@ async def execute_rebalance_endpoint(request: ExecutionRequest):
         }
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    finally:
-        if ib is not None and ib.isConnected():
-            ib.disconnect()
 
 
 @app.get("/agents/research/prompt")
@@ -709,7 +964,11 @@ async def get_research_agent_prompt():
             SRC_DIR / "agents" / "research" / "context.py",
         )
 
-        return {"prompt": research_context.DEFAULT_RESEARCH_PROMPT.strip()}
+        prompt_parts = []
+        if hasattr(research_context, "sellside_agent_instructions"):
+            prompt_parts.append(research_context.sellside_agent_instructions().strip())
+        prompt_parts.append(research_context.DEFAULT_RESEARCH_PROMPT.strip())
+        return {"prompt": "\n\n".join(prompt_parts)}
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -758,11 +1017,16 @@ Portfolio Research Note
 5. Compliance Note
 """
 
+        system_prompt_parts = []
+        if hasattr(research_context, "sellside_agent_instructions"):
+            system_prompt_parts.append(research_context.sellside_agent_instructions().strip())
+        system_prompt_parts.append(research_context.DEFAULT_RESEARCH_PROMPT.strip())
+
         output = _chat_completion_text(
             [
                 {
                     "role": "system",
-                    "content": research_context.DEFAULT_RESEARCH_PROMPT.strip(),
+                    "content": "\n\n".join(system_prompt_parts),
                 },
                 {"role": "user", "content": prompt.strip()},
             ],

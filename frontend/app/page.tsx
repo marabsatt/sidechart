@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, type ReactNode, useMemo, useState } from "react";
+import { FormEvent, type ReactNode, useEffect, useMemo, useState } from "react";
 
 type ApiState = "idle" | "loading" | "ready" | "error";
 
@@ -21,6 +21,7 @@ type PipelineResult = {
   status?: string;
   error?: string;
   bullish_tickers?: string[];
+  screened_bullish_tickers?: string[];
   bearish_tickers?: string[];
   top_performers?: string[];
   market_data?: MarketRow[];
@@ -29,6 +30,7 @@ type PipelineResult = {
   candidate_tickers?: string[];
   allocation_tickers?: string[];
   signal_fallback?: boolean;
+  requested_positions?: number;
 };
 
 type SignalsResult = {
@@ -43,6 +45,42 @@ type ExecutionPreview = {
   message?: string;
 };
 
+type IbkrConnectionStatus = {
+  connected: boolean;
+  host?: string | null;
+  port?: number | null;
+  client_id?: number | null;
+  connected_at?: string | null;
+  mode?: string | null;
+  message?: string;
+};
+
+type TradeRecord = {
+  symbol?: string | null;
+  action?: string | null;
+  order_id?: number | null;
+  order_type?: string | null;
+  quantity?: number | null;
+  tif?: string | null;
+  status?: string | null;
+  filled?: number | null;
+  remaining?: number | null;
+  avg_fill_price?: number | null;
+};
+
+type OrderSizing = {
+  account_value: number;
+  market_price: number;
+  target_notional: number;
+  quantity: number;
+};
+
+type OrderExecutionResult = {
+  dry_run: boolean;
+  trade?: TradeRecord;
+  sizing?: OrderSizing;
+};
+
 type AgentRunResult = {
   output: string;
   context?: string;
@@ -53,6 +91,8 @@ const API_BASE =
   "http://127.0.0.1:8000";
 
 const DEFAULT_TICKERS = "AAPL, MSFT, NVDA, AMZN, GOOGL, META, JPM, XOM";
+const DEFAULT_RESEARCH_CONTEXT =
+  "Loading default sell-side research instructions...";
 const RATIONALE_REQUIREMENTS = [
   "3-6 concise paragraphs explaining the allocation decision",
   "cite supporting research, signal, and performance evidence",
@@ -396,12 +436,11 @@ export default function Home() {
   const [tickersInput, setTickersInput] = useState(DEFAULT_TICKERS);
   const [lookbackDays, setLookbackDays] = useState(90);
   const [numSignals, setNumSignals] = useState(8);
-  const [researchNote, setResearchNote] = useState(
-    "No completed sell-side research note supplied yet.",
-  );
+  const [researchNote, setResearchNote] = useState(DEFAULT_RESEARCH_CONTEXT);
 
   const [backendState, setBackendState] = useState<ApiState>("idle");
   const [workflowState, setWorkflowState] = useState<ApiState>("idle");
+  const [ibkrState, setIbkrState] = useState<ApiState>("idle");
   const [message, setMessage] = useState("Ready to connect to SideChart API.");
 
   const [marketData, setMarketData] = useState<MarketRow[]>([]);
@@ -412,6 +451,12 @@ export default function Home() {
   const [supervisorAgentOutput, setSupervisorAgentOutput] = useState("");
   const [executionPreview, setExecutionPreview] =
     useState<ExecutionPreview | null>(null);
+  const [ibkrStatus, setIbkrStatus] = useState<IbkrConnectionStatus | null>(
+    null,
+  );
+  const [executingTicker, setExecutingTicker] = useState<string | null>(null);
+  const [lastOrderResult, setLastOrderResult] =
+    useState<OrderExecutionResult | null>(null);
 
   const tickers = useMemo(() => parseTickers(tickersInput), [tickersInput]);
   const weights = pipeline?.weights ?? [];
@@ -429,6 +474,47 @@ export default function Home() {
     (total, row) => total + Number(row.weights ?? 0),
     0,
   );
+  const ibkrConnected = ibkrState === "ready" && Boolean(ibkrStatus?.connected);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function loadResearchPrompt() {
+      try {
+        const response = await apiRequest<{ prompt: string }>(
+          "/agents/research/prompt",
+        );
+        if (isMounted && response.prompt) {
+          setResearchNote((current) =>
+            current === DEFAULT_RESEARCH_CONTEXT ? response.prompt : current,
+          );
+        }
+      } catch {
+        if (isMounted) {
+          setResearchNote((current) =>
+            current === DEFAULT_RESEARCH_CONTEXT
+              ? "Default sell-side research instructions could not be loaded."
+              : current,
+          );
+        }
+      }
+    }
+
+    loadResearchPrompt();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    apiRequest<IbkrConnectionStatus>("/broker/ibkr/status")
+      .then((status) => {
+        setIbkrStatus(status);
+        setIbkrState(status.connected ? "ready" : "idle");
+      })
+      .catch(() => setIbkrState("error"));
+  }, []);
 
   async function checkHealth() {
     setBackendState("loading");
@@ -442,6 +528,30 @@ export default function Home() {
     } catch (error) {
       setBackendState("error");
       setMessage(error instanceof Error ? error.message : "Backend unavailable.");
+    }
+  }
+
+  async function connectIbkr() {
+    setIbkrState("loading");
+    setMessage("Connecting to IBKR Trader Workstation or Gateway...");
+    try {
+      const response = await apiRequest<IbkrConnectionStatus>(
+        "/broker/ibkr/connect",
+        {
+          method: "POST",
+          body: JSON.stringify({}),
+        },
+      );
+      setIbkrStatus(response);
+      setIbkrState(response.connected ? "ready" : "error");
+      setBackendState("ready");
+      setMessage(
+        response.message ??
+          `IBKR connected on ${response.host ?? "127.0.0.1"}:${response.port ?? ""}.`,
+      );
+    } catch (error) {
+      setIbkrState("error");
+      setMessage(error instanceof Error ? error.message : "IBKR connection failed.");
     }
   }
 
@@ -501,10 +611,11 @@ export default function Home() {
 
     setSignals(signalResponse);
 
-    const rankedTickers = latestMonthlyReturns(
-      response.data,
-      signalResponse.bullish_tickers,
-    )
+    const bullishUniverse =
+      signalResponse.bullish_tickers.length > 0
+        ? signalResponse.bullish_tickers
+        : Array.from(new Set(response.data.map((row) => row.ticker)));
+    const rankedTickers = latestMonthlyReturns(response.data, bullishUniverse)
       .slice(0, Math.max(numSignals, 1))
       .map((row) => row.ticker);
 
@@ -514,13 +625,18 @@ export default function Home() {
 
     setTickersInput(rankedTickers.join(", "));
     setMessage(
-      `Universe populated with ${rankedTickers.length} bullish stocks ranked by latest monthly return.`,
+      signalResponse.bullish_tickers.length > 0
+        ? `Universe populated with ${rankedTickers.length} bullish stocks ranked by latest monthly return.`
+        : `Universe populated with ${rankedTickers.length} top monthly performers because no strict bullish signals were found.`,
     );
     return rankedTickers;
   }
 
   function applyPipelineResult(response: PipelineResult) {
     setPipeline(response);
+    if (response.allocation_tickers?.length) {
+      setTickersInput(response.allocation_tickers.join(", "));
+    }
     if (response.market_data) {
       setMarketData(response.market_data);
     }
@@ -536,7 +652,11 @@ export default function Home() {
   async function ensurePipelineResults(workingTickers: string[]) {
     const pipelineTickers =
       pipeline?.allocation_tickers ?? pipeline?.weights?.map((row) => row.ticker) ?? [];
-    if (pipeline?.weights?.length && sameTickerSet(pipelineTickers, workingTickers)) {
+    if (
+      pipeline?.weights?.length &&
+      pipeline.requested_positions === numSignals &&
+      sameTickerSet(pipelineTickers, workingTickers)
+    ) {
       return pipeline;
     }
 
@@ -606,8 +726,7 @@ export default function Home() {
     setWorkflowState("loading");
     setMessage("Running analysis pipeline...");
     try {
-      const workingTickers =
-        tickers.length > 0 ? tickers : await discoverBullishUniverse();
+      const workingTickers = tickers;
       const response = await apiRequest<PipelineResult>("/pipeline/dev/analyze", {
         method: "POST",
         body: JSON.stringify({
@@ -619,10 +738,10 @@ export default function Home() {
       applyPipelineResult(response);
       setMessage(
         response.status === "success"
-          ? `Pipeline complete with ${response.weights?.length ?? 0} target positions.`
-          : response.status === "fallback"
-            ? `No daily bullish signals found; using ${response.candidate_tickers?.length ?? 0} pre-screened candidates for allocation.`
-          : response.error ?? `Pipeline returned ${response.status ?? "partial"} status.`,
+          ? `Pipeline complete with ${response.weights?.length ?? 0} bullish target positions.`
+          : response.status === "partial"
+            ? `Found ${response.weights?.length ?? 0} bullish positions of ${numSignals} requested in the available market data.`
+            : response.error ?? `Pipeline returned ${response.status ?? "partial"} status.`,
       );
       setWorkflowState(response.status === "failed" ? "error" : "ready");
     } catch (error) {
@@ -727,6 +846,36 @@ export default function Home() {
       setMessage(
         error instanceof Error ? error.message : "Supervisor context failed.",
       );
+    }
+  }
+
+  async function executeTickerTrade(row: WeightRow) {
+    if (!ibkrConnected) {
+      setMessage("Connect to IBKR before executing trades.");
+      return;
+    }
+
+    setExecutingTicker(row.ticker);
+    setMessage(
+      `Sizing ${row.ticker} order from ${formatPercent(row.weights)} target weight...`,
+    );
+    try {
+      const response = await apiRequest<OrderExecutionResult>("/orders/buy", {
+        method: "POST",
+        body: JSON.stringify({
+          ticker: row.ticker,
+          target_weight: row.weights,
+          dry_run: false,
+        }),
+      });
+      setLastOrderResult(response);
+      setMessage(
+        `IBKR order ${response.trade?.order_id ?? "pending"}: ${response.trade?.quantity ?? response.sizing?.quantity ?? 0} shares of ${row.ticker} from ${formatPercent(row.weights)} target weight. Status: ${response.trade?.status ?? "pending"}.`,
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Trade execution failed.");
+    } finally {
+      setExecutingTicker(null);
     }
   }
 
@@ -899,9 +1048,21 @@ export default function Home() {
                 <div className="allocation-list">
                   {weights.map((row) => (
                     <div className="allocation-row" key={row.ticker}>
-                      <div>
-                        <strong>{row.ticker}</strong>
-                        <span>{formatPercent(row.weights)}</span>
+                      <div className="allocation-row-header">
+                        <div className="allocation-row-label">
+                          <strong>{row.ticker}</strong>
+                          <span>{formatPercent(row.weights)}</span>
+                        </div>
+                        <button
+                          type="button"
+                          className="trade-button"
+                          onClick={() => executeTickerTrade(row)}
+                          disabled={!ibkrConnected || Boolean(executingTicker) || row.weights <= 0}
+                        >
+                          {executingTicker === row.ticker
+                            ? "Executing..."
+                            : "Execute trade"}
+                        </button>
                       </div>
                       <div className="bar-track">
                         <span
@@ -1026,7 +1187,10 @@ export default function Home() {
                   <h2>Review context</h2>
                 </div>
               </div>
-              <pre>{supervisorContext || "Supervisor context will appear here."}</pre>
+              <MarkdownMemo
+                content={supervisorContext}
+                placeholder="Supervisor context will appear here."
+              />
             </section>
 
             <section className="panel text-panel">
@@ -1035,7 +1199,57 @@ export default function Home() {
                   <p className="eyebrow">Execution</p>
                   <h2>Dry-run preview</h2>
                 </div>
+                <div className="execution-actions">
+                  <span className={`pill ${ibkrState}`}>
+                    {ibkrConnected ? "connected" : ibkrState}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={connectIbkr}
+                    disabled={ibkrState === "loading"}
+                  >
+                    Connect to IBKR
+                  </button>
+                </div>
               </div>
+              {lastOrderResult?.trade ? (
+                <div className="execution-list latest-order">
+                  <p>Last IBKR order #{lastOrderResult.trade.order_id ?? "pending"}</p>
+                  <div className="execution-row">
+                    <span>{lastOrderResult.trade.symbol ?? "--"}</span>
+                    <strong>
+                      {lastOrderResult.trade.action ?? "BUY"}{" "}
+                      {lastOrderResult.trade.quantity ??
+                        lastOrderResult.sizing?.quantity ??
+                        "--"}
+                    </strong>
+                  </div>
+                  {lastOrderResult.sizing ? (
+                    <div className="execution-row">
+                      <span>
+                        ${lastOrderResult.sizing.target_notional.toLocaleString(
+                          undefined,
+                          { maximumFractionDigits: 2 },
+                        )}
+                      </span>
+                      <strong>
+                        @ $
+                        {lastOrderResult.sizing.market_price.toLocaleString(
+                          undefined,
+                          { maximumFractionDigits: 2 },
+                        )}
+                      </strong>
+                    </div>
+                  ) : null}
+                  <div className="execution-row">
+                    <span>{lastOrderResult.trade.status ?? "submitted"}</span>
+                    <strong>
+                      {lastOrderResult.trade.order_type ?? "MKT"}{" "}
+                      {lastOrderResult.trade.tif ?? "GTC"}
+                    </strong>
+                  </div>
+                </div>
+              ) : null}
               {executionPreview ? (
                 <div className="execution-list">
                   <p>{executionPreview.message}</p>
