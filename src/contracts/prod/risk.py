@@ -5,22 +5,29 @@ from datetime import datetime, timedelta
 
 from .market_data import get_market_data
 
-def port_opt(tickers: list, lookback_days: int = 30) -> pd.DataFrame:
+def port_opt(
+    tickers: list,
+    lookback_months: int = 3,
+    lookback_days: int | None = None,
+) -> pd.DataFrame:
     '''
     Function used to calculate the portfolio weights using Sharpe as the maximizing objective
 
     Args: 
         tickers (list): List of ticker symbols to optimize
-        lookback_days (int): Number of days to look back for returns calculation
+        lookback_months (int): Number of months to look back for returns calculation
 
     Return: 
         weights (pd.DataFrame): DataFrame with columns 'ticker' and 'weights' for portfolio allocation
     '''
     if not tickers:
         return pd.DataFrame(columns=['ticker', 'weights'])
+    if lookback_days is not None:
+        lookback_months = max(1, round(lookback_days / 30))
+    lookback_months = max(1, int(lookback_months))
     
     try:
-        start_date = (datetime.now() - timedelta(days=lookback_days)).strftime('%Y-%m-%d')
+        start_date = (datetime.now() - timedelta(days=max(lookback_months * 31, 60))).strftime('%Y-%m-%d')
         
         # Get market data for tickers
         market_data = get_market_data(tickers, start_date=start_date)

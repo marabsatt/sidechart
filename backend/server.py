@@ -302,8 +302,13 @@ async def _weighted_order_quantity(ib: Any, ticker: str, target_weight: float) -
     if target_weight <= 0:
         raise ValueError("target_weight must be greater than zero")
 
-    await ib.accountSummaryAsync()
-    account_value = _account_net_liquidation(ib)
+    try:
+        account_value = _account_net_liquidation(ib)
+    except ValueError:
+        # The persistent IBKR connection normally has account updates already.
+        # Request a summary only when those updates have not arrived yet.
+        await ib.accountSummaryAsync()
+        account_value = _account_net_liquidation(ib)
     market_price = await _latest_ib_price(ib, ticker)
     target_notional = account_value * target_weight
     quantity = math.floor(target_notional / market_price)
@@ -465,7 +470,7 @@ class SignalsRequest(BaseModel):
 
 class PipelineRequest(BaseModel):
     tickers: list[str]
-    lookback_days: int = Field(default=30, gt=0)
+    lookback_months: int = Field(default=3, gt=0)
     num_signals: int = Field(default=20, gt=0)
 
 
@@ -517,7 +522,7 @@ class SupervisorContextRequest(BaseModel):
     sellside_research: Optional[str] = None
     pipeline_results: Optional[dict[str, Any]] = None
     current_positions: Optional[list[dict[str, Any]]] = None
-    lookback_days: int = Field(default=30, gt=0)
+    lookback_months: int = Field(default=3, gt=0)
     num_signals: int = Field(default=20, gt=0)
 
 
@@ -525,7 +530,7 @@ class ResearchAgentRunRequest(BaseModel):
     tickers: Optional[list[str]] = None
     source_context: Optional[str] = None
     pipeline_results: Optional[dict[str, Any]] = None
-    lookback_days: int = Field(default=30, gt=0)
+    lookback_months: int = Field(default=3, gt=0)
     num_signals: int = Field(default=20, gt=0)
 
 
@@ -783,7 +788,7 @@ async def run_dev_analysis_pipeline(request: PipelineRequest):
         result = await asyncio.to_thread(
             run_analysis_pipeline,
             _normalize_tickers(request.tickers),
-            request.lookback_days,
+            request.lookback_months,
             request.num_signals,
         )
         return _make_json_safe(result)
@@ -825,6 +830,25 @@ async def get_dev_current_holdings():
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@app.get("/portfolio/holdings")
+async def get_current_holdings(
+    host: str = os.getenv("IB_HOST", "127.0.0.1"),
+    port: int = int(os.getenv("IB_PORT", "7497")),
+    client_id: int = int(os.getenv("IB_CLIENT_ID", "17")),
+):
+    """Return current positions from the shared asynchronous IBKR session."""
+    try:
+        ib = await _get_order_ib(host, port, client_id)
+        async with IB_CONNECTION_LOCK:
+            positions = ib.positions()
+        return {
+            "connected": bool(ib.isConnected()),
+            "holdings": [_position_to_record(position) for position in positions],
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @app.post("/orders/buy")
 async def buy_order(request: OrderRequest):
     if request.quantity is None and request.target_weight is None:
@@ -858,6 +882,7 @@ async def buy_order(request: OrderRequest):
 
     try:
         from contracts.orders import buy_stock
+        from ib_insync import Stock
 
         ib = await _get_order_ib(
             request.host,
@@ -874,7 +899,16 @@ async def buy_order(request: OrderRequest):
                     float(request.target_weight or 0),
                 )
                 quantity = sizing["quantity"]
-            trade = buy_stock(ib, request.ticker.upper(), quantity)
+            contract = Stock(request.ticker.upper(), "SMART", "USD")
+            qualified_contracts = await ib.qualifyContractsAsync(contract)
+            if not qualified_contracts:
+                raise ValueError(f"IBKR could not qualify contract {request.ticker.upper()}")
+            trade = buy_stock(
+                ib,
+                request.ticker.upper(),
+                quantity,
+                contract=qualified_contracts[0],
+            )
             await _await_order_acknowledgment(trade)
 
         response = {"dry_run": False, "trade": _trade_to_record(trade)}
@@ -901,6 +935,7 @@ async def sell_order(request: OrderRequest):
 
     try:
         from contracts.orders import sell_stock
+        from ib_insync import Stock
 
         ib = await _get_order_ib(
             request.host,
@@ -908,7 +943,33 @@ async def sell_order(request: OrderRequest):
             request.client_id,
         )
         async with IB_CONNECTION_LOCK:
-            trade = sell_stock(ib, request.ticker.upper(), request.quantity)
+            ticker = request.ticker.upper()
+            position = next(
+                (
+                    current_position
+                    for current_position in ib.positions()
+                    if getattr(getattr(current_position, "contract", None), "symbol", "") == ticker
+                ),
+                None,
+            )
+            available_quantity = float(getattr(position, "position", 0) or 0)
+            if available_quantity <= 0:
+                raise ValueError(f"No long position found for {ticker}")
+            if request.quantity is not None and request.quantity > available_quantity:
+                raise ValueError(
+                    f"Cannot sell {request.quantity} shares of {ticker}; only {available_quantity} are held"
+                )
+
+            contract = Stock(ticker, "SMART", "USD")
+            qualified_contracts = await ib.qualifyContractsAsync(contract)
+            if not qualified_contracts:
+                raise ValueError(f"IBKR could not qualify contract {ticker}")
+            trade = sell_stock(
+                ib,
+                ticker,
+                request.quantity,
+                contract=qualified_contracts[0],
+            )
             await _await_order_acknowledgment(trade)
         return {"dry_run": False, "trade": _trade_to_record(trade)}
     except Exception as exc:
@@ -1052,7 +1113,7 @@ async def get_supervisor_agent_context(request: SupervisorContextRequest):
             sellside_research=request.sellside_research,
             pipeline_results=request.pipeline_results,
             current_positions=request.current_positions,
-            lookback_days=request.lookback_days,
+            lookback_months=request.lookback_months,
             num_signals=request.num_signals,
         )
         return {"context": context}
@@ -1073,7 +1134,7 @@ async def run_supervisor_agent(request: SupervisorAgentRunRequest):
             sellside_research=request.sellside_research,
             pipeline_results=request.pipeline_results,
             current_positions=request.current_positions,
-            lookback_days=request.lookback_days,
+            lookback_months=request.lookback_months,
             num_signals=request.num_signals,
         )
         output = _chat_completion_text(

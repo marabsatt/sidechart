@@ -24,7 +24,7 @@ from ..execution import execute_rebalance
 
 def run_analysis_pipeline(
     tickers: list,
-    lookback_days: int = 30,
+    lookback_months: int = 3,
     num_signals: int = 20,
     signal_threshold_days: int = 5,
 ) -> dict:
@@ -33,7 +33,7 @@ def run_analysis_pipeline(
     
     Args:
         tickers (list): List of ticker symbols to analyze
-        lookback_days (int): Number of days to look back for analysis
+        lookback_months (int): Number of months to look back for analysis
         num_signals (int): Number of top performers to select
         signal_threshold_days (int): Minimum days of data required for signals
     
@@ -44,7 +44,7 @@ def run_analysis_pipeline(
     
     # Step 1: Gather market data
     print("Step 1: Gathering market data...")
-    start_date = (datetime.now() - timedelta(days=lookback_days)).strftime('%Y-%m-%d')
+    start_date = (datetime.now() - timedelta(days=max(lookback_months, 1) * 31)).strftime('%Y-%m-%d')
     market_data = get_market_data(tickers, start_date=start_date)
     
     if market_data.empty:
@@ -73,7 +73,7 @@ def run_analysis_pipeline(
     
     # Step 3: Calculate returns for bullish tickers
     print("Step 3: Calculating returns for bullish tickers...")
-    top_performers = get_top_performers(bullish_tickers, keep=num_signals, lookback_days=lookback_days)
+    top_performers = get_top_performers(bullish_tickers, keep=num_signals, lookback_months=lookback_months)
     print(f"  Top {len(top_performers)} performers selected")
     
     if not top_performers:
@@ -87,7 +87,7 @@ def run_analysis_pipeline(
     
     # Step 4: Calculate portfolio weights
     print("Step 4: Calculating portfolio weights...")
-    weights_df = port_opt(top_performers, lookback_days=lookback_days)
+    weights_df = port_opt(top_performers, lookback_months=lookback_months)
     print(f"  Calculated weights for {len(weights_df)} tickers")
     
     return {
@@ -104,7 +104,7 @@ def run_analysis_pipeline(
 def run_trading_pipeline(
     ib: IB,
     tickers: list,
-    lookback_days: int = 30,
+    lookback_months: int = 3,
     num_signals: int = 20,
     account_value: Optional[float] = None,
     sell_timeout: float = 300.0,
@@ -115,7 +115,7 @@ def run_trading_pipeline(
     Args:
         ib (IB): Connected ib_insync IB instance
         tickers (list): List of ticker symbols to analyze
-        lookback_days (int): Number of days to look back for analysis
+        lookback_months (int): Number of months to look back for analysis
         num_signals (int): Number of top performers to select
         account_value (float): Account net liquidation value (auto-fetched if None)
         sell_timeout (float): Timeout for waiting on sell orders (seconds)
@@ -126,7 +126,7 @@ def run_trading_pipeline(
     # Run analysis pipeline
     analysis_results = run_analysis_pipeline(
         tickers=tickers,
-        lookback_days=lookback_days,
+        lookback_months=lookback_months,
         num_signals=num_signals
     )
     

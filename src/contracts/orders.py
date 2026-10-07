@@ -1,7 +1,7 @@
 import math
 from ib_insync import IB, Order, Stock
 
-def buy_stock(ib: IB, long_ticker: str, buy_diff: float):
+def buy_stock(ib: IB, long_ticker: str, buy_diff: float, contract: Stock | None = None):
         '''
         Function to place purchase orders with IBKR
 
@@ -12,10 +12,10 @@ def buy_stock(ib: IB, long_ticker: str, buy_diff: float):
         Returns:
             Trade: The submitted IBKR trade handle
         '''
-        stock = Stock(
-            symbol = long_ticker, 
-            exchange = 'SMART', 
-            currency = 'USD'
+        stock = contract or Stock(
+            symbol=long_ticker,
+            exchange='SMART',
+            currency='USD',
         )
         
         action = Order(
@@ -28,7 +28,7 @@ def buy_stock(ib: IB, long_ticker: str, buy_diff: float):
         
         return ib.placeOrder(stock, action)
 
-def sell_stock(ib: IB, ticker: str, sell_diff: float = None):
+def sell_stock(ib: IB, ticker: str, sell_diff: float = None, contract: Stock | None = None):
         '''
         Function to place sell orders with IBKR
 
@@ -39,17 +39,20 @@ def sell_stock(ib: IB, ticker: str, sell_diff: float = None):
         Returns:
             Trade: The submitted IBKR trade handle
         '''
-        stock = Stock(
-            symbol = ticker, 
-            exchange = 'SMART', 
-            currency = 'USD'
+        stock = contract or Stock(
+            symbol=ticker,
+            exchange='SMART',
+            currency='USD',
         )
         
+        sell_amount = None
         for i in range (len(ib.positions())):
             if ib.positions()[i].contract.symbol == ticker:
                 sell_amount = ib.positions()[i].position
 
         if sell_diff is None:
+            if sell_amount is None:
+                raise ValueError(f'No position found for {ticker}')
             action = Order(
                 action = 'SELL', 
                 totalQuantity = sell_amount, 

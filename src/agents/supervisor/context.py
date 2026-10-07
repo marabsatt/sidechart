@@ -164,7 +164,7 @@ def supervisor_agent(
     sellside_research: str | None = None,
     pipeline_results: dict[str, Any] | None = None,
     current_positions: Any = None,
-    lookback_days: int = 30,
+    lookback_months: int = 3,
     num_signals: int = 20,
 ) -> str:
     """
@@ -181,7 +181,7 @@ def supervisor_agent(
 
             pipeline_results = run_analysis_pipeline(
                 tickers=tickers,
-                lookback_days=lookback_days,
+                lookback_months=lookback_months,
                 num_signals=num_signals,
             )
 

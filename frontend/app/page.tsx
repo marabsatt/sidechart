@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, type ReactNode, useEffect, useMemo, useState } from "react";
+import { FormEvent, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 
 type ApiState = "idle" | "loading" | "ready" | "error";
 
@@ -81,6 +81,15 @@ type OrderExecutionResult = {
   sizing?: OrderSizing;
 };
 
+type HoldingRow = {
+  account?: string | null;
+  symbol: string;
+  exchange?: string | null;
+  currency?: string | null;
+  position: number;
+  avg_cost?: number | null;
+};
+
 type AgentRunResult = {
   output: string;
   context?: string;
@@ -93,12 +102,6 @@ const API_BASE =
 const DEFAULT_TICKERS = "AAPL, MSFT, NVDA, AMZN, GOOGL, META, JPM, XOM";
 const DEFAULT_RESEARCH_CONTEXT =
   "Loading default sell-side research instructions...";
-const RATIONALE_REQUIREMENTS = [
-  "3-6 concise paragraphs explaining the allocation decision",
-  "cite supporting research, signal, and performance evidence",
-  "identify unavailable data instead of guessing",
-  "include the informational-analysis disclaimer",
-];
 
 function parseTickers(value: string) {
   return Array.from(
@@ -127,27 +130,6 @@ function formatDateTime() {
   }).format(new Date());
 }
 
-function summarizeText(value: string, maxLength = 520) {
-  const normalized = value.replace(/\s+/g, " ").trim();
-  if (!normalized) {
-    return "No sell-side agent information supplied.";
-  }
-  if (normalized.length <= maxLength) {
-    return normalized;
-  }
-  return `${normalized.slice(0, maxLength).trim()}...`;
-}
-
-function buildSupervisorBrief(researchNote: string) {
-  return [
-    "Condensed sell-side context:",
-    summarizeText(researchNote),
-    "",
-    "Rationale section should return:",
-    ...RATIONALE_REQUIREMENTS.map((item) => `- ${item}`),
-  ].join("\n");
-}
-
 function latestMonthlyReturns(rows: MarketRow[], candidateTickers: string[]) {
   const candidates = new Set(candidateTickers);
   const byTicker = new Map<string, MarketRow[]>();
@@ -166,10 +148,20 @@ function latestMonthlyReturns(rows: MarketRow[], candidateTickers: string[]) {
       const sortedRows = tickerRows
         .filter((row) => typeof row.close === "number")
         .sort((first, second) => String(first.date).localeCompare(String(second.date)));
-      const latest = sortedRows.at(-1);
-      const previous = sortedRows.at(-2);
-      const latestClose = Number(latest?.close ?? 0);
-      const previousClose = Number(previous?.close ?? 0);
+      const monthlyCloses = new Map<string, number>();
+      for (const row of sortedRows) {
+        const month = String(row.date).slice(0, 7);
+        monthlyCloses.set(month, Number(row.close));
+      }
+      const currentMonth = new Date().toISOString().slice(0, 7);
+      const completedMonths = Array.from(monthlyCloses.entries())
+        .filter(([month]) => month < currentMonth)
+        .map(([, close]) => close);
+      const closes = completedMonths.length >= 2
+        ? completedMonths
+        : Array.from(monthlyCloses.values());
+      const latestClose = closes.at(-1) ?? 0;
+      const previousClose = closes.at(-2) ?? 0;
       return {
         ticker,
         monthlyReturn:
@@ -188,6 +180,214 @@ function sameTickerSet(first: string[], second: string[]) {
   }
   const firstSet = new Set(first);
   return second.every((ticker) => firstSet.has(ticker));
+}
+
+type ChartBounds = {
+  min: number;
+  max: number;
+  top: number;
+  height: number;
+};
+
+function chartNumber(row: MarketRow, key: string) {
+  const value = Number(row[key]);
+  return Number.isFinite(value) ? value : null;
+}
+
+function chartBounds(rows: MarketRow[], keys: string[], top: number, height: number): ChartBounds {
+  const values = rows.flatMap((row) =>
+    keys
+      .map((key) => chartNumber(row, key))
+      .filter((value): value is number => value !== null),
+  );
+  if (values.length === 0) {
+    return { min: 0, max: 1, top, height };
+  }
+  const rawMin = Math.min(...values);
+  const rawMax = Math.max(...values);
+  const spread = rawMax - rawMin || Math.max(Math.abs(rawMax) * 0.05, 1);
+  return {
+    min: rawMin - spread * 0.08,
+    max: rawMax + spread * 0.08,
+    top,
+    height,
+  };
+}
+
+function chartX(index: number, count: number, width: number, left: number) {
+  return left + (count <= 1 ? width / 2 : (index / (count - 1)) * width);
+}
+
+function chartY(value: number, bounds: ChartBounds) {
+  return bounds.top + bounds.height - ((value - bounds.min) / (bounds.max - bounds.min)) * bounds.height;
+}
+
+function chartTicks(bounds: ChartBounds, count = 4) {
+  return Array.from({ length: count + 1 }, (_, index) => {
+    const value = bounds.max - ((bounds.max - bounds.min) * index) / count;
+    return { value, y: chartY(value, bounds) };
+  });
+}
+
+function chartTickIndices(count: number, desired = 6) {
+  if (count <= 1) return [0];
+  const tickCount = Math.min(desired, count);
+  return Array.from({ length: tickCount }, (_, index) =>
+    Math.round((index * (count - 1)) / (tickCount - 1)),
+  );
+}
+
+function formatChartValue(value: number, decimals: number) {
+  return value.toFixed(decimals);
+}
+
+function formatChartDate(value: string) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value.slice(0, 10);
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "2-digit",
+  }).format(parsed);
+}
+
+function chartPath(
+  rows: MarketRow[],
+  key: string,
+  bounds: ChartBounds,
+  left: number,
+  width: number,
+) {
+  const points = rows
+    .map((row, index) => {
+      const value = chartNumber(row, key);
+      return value === null
+        ? null
+        : `${chartX(index, rows.length, width, left).toFixed(2)},${chartY(value, bounds).toFixed(2)}`;
+    })
+    .filter((point): point is string => point !== null);
+  return points.length > 1 ? `M ${points.join(" L ")}` : "";
+}
+
+function SignalChart({ ticker, rows }: { ticker: string; rows: MarketRow[] }) {
+  const sortedRows = [...rows]
+    .filter((row) => row.date)
+    .sort((first, second) => String(first.date).localeCompare(String(second.date)))
+    .slice(-90);
+  const left = 78;
+  const width = 874;
+  const panelHeight = 132;
+  const priceBounds = chartBounds(sortedRows, ["close", "_EMA_5", "_EMA_15"], 28, panelHeight);
+  const rawMacdBounds = chartBounds(sortedRows, ["_MACD", "_Signal_Line", "_MACD_Hist"], 192, panelHeight);
+  const macdBounds = {
+    ...rawMacdBounds,
+    min: Math.min(rawMacdBounds.min, 0),
+    max: Math.max(rawMacdBounds.max, 0),
+  };
+  const rsiBounds = { min: 0, max: 100, top: 356, height: panelHeight };
+  const zeroY = chartY(0, macdBounds);
+  const barWidth = Math.max(2, width / Math.max(sortedRows.length, 1) - 2);
+  const priceTicks = chartTicks(priceBounds);
+  const macdTicks = chartTicks(macdBounds);
+  const rsiTicks = chartTicks(rsiBounds, 4);
+  const dateIndices = chartTickIndices(sortedRows.length);
+
+  if (sortedRows.length < 2) {
+    return <p className="empty-state">No indicator history available for {ticker}.</p>;
+  }
+
+  return (
+    <div className="signal-chart-wrap">
+      <div className="chart-heading">
+        <strong>{ticker} indicator history</strong>
+        <span>{sortedRows.length} observations</span>
+      </div>
+      <svg className="signal-chart" viewBox="0 0 980 560" role="img" aria-label={`${ticker} price, EMA, MACD, and RSI chart`}>
+        <line className="chart-divider" x1="0" y1="176" x2="980" y2="176" />
+        <line className="chart-divider" x1="0" y1="340" x2="980" y2="340" />
+        <text className="chart-label" x="8" y="18">PRICE / EMA</text>
+        <text className="chart-label" x="8" y="182">MACD</text>
+        <text className="chart-label" x="8" y="346">RSI</text>
+        {[...priceTicks, ...macdTicks, ...rsiTicks].map((tick, index) => {
+          return (
+            <line
+              className="chart-grid horizontal-grid"
+              key={`horizontal-grid-${index}`}
+              x1={left}
+              y1={tick.y}
+              x2={left + width}
+              y2={tick.y}
+            />
+          );
+        })}
+        {dateIndices.map((index) => {
+          const x = chartX(index, sortedRows.length, width, left);
+          return (
+            <g key={`vertical-grid-${index}`}>
+              <line className="chart-grid vertical-grid" x1={x} y1={priceBounds.top} x2={x} y2={rsiBounds.top + rsiBounds.height} />
+              <text className="chart-axis-label date-axis-label" x={x} y="516" textAnchor="middle">
+                {formatChartDate(String(sortedRows[index].date))}
+              </text>
+            </g>
+          );
+        })}
+        {priceTicks.map((tick, index) => (
+          <text className="chart-axis-label" key={`price-axis-${index}`} x={left - 8} y={tick.y + 4} textAnchor="end">
+            {formatChartValue(tick.value, 2)}
+          </text>
+        ))}
+        {macdTicks.map((tick, index) => (
+          <text className="chart-axis-label" key={`macd-axis-${index}`} x={left - 8} y={tick.y + 4} textAnchor="end">
+            {formatChartValue(tick.value, 3)}
+          </text>
+        ))}
+        {rsiTicks.map((tick, index) => (
+          <text className="chart-axis-label" key={`rsi-axis-${index}`} x={left - 8} y={tick.y + 4} textAnchor="end">
+            {formatChartValue(tick.value, 0)}
+          </text>
+        ))}
+        <line className="chart-axis" x1={left} y1={priceBounds.top + priceBounds.height} x2={left + width} y2={priceBounds.top + priceBounds.height} />
+        <line className="chart-axis" x1={left} y1={macdBounds.top + macdBounds.height} x2={left + width} y2={macdBounds.top + macdBounds.height} />
+        <line className="chart-axis" x1={left} y1={rsiBounds.top + rsiBounds.height} x2={left + width} y2={rsiBounds.top + rsiBounds.height} />
+        <path className="chart-line price-line" d={chartPath(sortedRows, "close", priceBounds, left, width)} />
+        <path className="chart-line ema-fast-line" d={chartPath(sortedRows, "_EMA_5", priceBounds, left, width)} />
+        <path className="chart-line ema-slow-line" d={chartPath(sortedRows, "_EMA_15", priceBounds, left, width)} />
+        {sortedRows.map((row, index) => {
+          const value = chartNumber(row, "_MACD_Hist");
+          if (value === null) return null;
+          const x = chartX(index, sortedRows.length, width, left) - barWidth / 2;
+          const y = chartY(value, macdBounds);
+          return (
+            <rect
+              className={value >= 0 ? "macd-bar positive-bar" : "macd-bar negative-bar"}
+              key={`macd-bar-${index}`}
+              x={x}
+              y={Math.min(y, zeroY)}
+              width={barWidth}
+              height={Math.max(1, Math.abs(y - zeroY))}
+            />
+          );
+        })}
+        <line className="chart-zero" x1={left} y1={zeroY} x2={left + width} y2={zeroY} />
+        <path className="chart-line macd-line" d={chartPath(sortedRows, "_MACD", macdBounds, left, width)} />
+        <path className="chart-line signal-line" d={chartPath(sortedRows, "_Signal_Line", macdBounds, left, width)} />
+        <line className="chart-guide" x1={left} y1={chartY(70, rsiBounds)} x2={left + width} y2={chartY(70, rsiBounds)} />
+        <line className="chart-guide" x1={left} y1={chartY(30, rsiBounds)} x2={left + width} y2={chartY(30, rsiBounds)} />
+        <path className="chart-line rsi-fast-line" d={chartPath(sortedRows, "_FAST_RSI", rsiBounds, left, width)} />
+        <path className="chart-line rsi-slow-line" d={chartPath(sortedRows, "_SLOW_RSI", rsiBounds, left, width)} />
+        <text className="chart-axis-label date-axis-title" x={left + width / 2} y="544" textAnchor="middle">DATE</text>
+      </svg>
+      <div className="chart-legend" aria-hidden="true">
+        <span><i className="legend-swatch price-line" />Price</span>
+        <span><i className="legend-swatch ema-fast-line" />EMA 5</span>
+        <span><i className="legend-swatch ema-slow-line" />EMA 15</span>
+        <span><i className="legend-swatch macd-line" />MACD</span>
+        <span><i className="legend-swatch signal-line" />Signal</span>
+        <span><i className="legend-swatch rsi-fast-line" />RSI 5</span>
+        <span><i className="legend-swatch rsi-slow-line" />RSI 15</span>
+      </div>
+    </div>
+  );
 }
 
 function splitTableRow(line: string) {
@@ -434,7 +634,7 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
 
 export default function Home() {
   const [tickersInput, setTickersInput] = useState(DEFAULT_TICKERS);
-  const [lookbackDays, setLookbackDays] = useState(90);
+  const [lookbackMonths, setLookbackMonths] = useState(3);
   const [numSignals, setNumSignals] = useState(8);
   const [researchNote, setResearchNote] = useState(DEFAULT_RESEARCH_CONTEXT);
 
@@ -443,10 +643,8 @@ export default function Home() {
   const [ibkrState, setIbkrState] = useState<ApiState>("idle");
   const [message, setMessage] = useState("Ready to connect to SideChart API.");
 
-  const [marketData, setMarketData] = useState<MarketRow[]>([]);
   const [signals, setSignals] = useState<SignalsResult | null>(null);
   const [pipeline, setPipeline] = useState<PipelineResult | null>(null);
-  const [supervisorContext, setSupervisorContext] = useState("");
   const [researchAgentOutput, setResearchAgentOutput] = useState("");
   const [supervisorAgentOutput, setSupervisorAgentOutput] = useState("");
   const [executionPreview, setExecutionPreview] =
@@ -457,17 +655,22 @@ export default function Home() {
   const [executingTicker, setExecutingTicker] = useState<string | null>(null);
   const [lastOrderResult, setLastOrderResult] =
     useState<OrderExecutionResult | null>(null);
+  const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
+  const [holdings, setHoldings] = useState<HoldingRow[]>([]);
+  const [holdingsState, setHoldingsState] = useState<ApiState>("idle");
+  const [sellAmounts, setSellAmounts] = useState<Record<string, string>>({});
+  const [executingSellTicker, setExecutingSellTicker] = useState<string | null>(null);
 
   const tickers = useMemo(() => parseTickers(tickersInput), [tickersInput]);
   const weights = pipeline?.weights ?? [];
   const bullish = pipeline?.bullish_tickers ?? signals?.bullish_tickers ?? [];
   const bearish = pipeline?.bearish_tickers ?? signals?.bearish_tickers ?? [];
-  const latestSignals = (pipeline?.signals_data ?? signals?.signals_data ?? [])
-    .slice(-10)
-    .reverse();
-  const supervisorBrief = useMemo(
-    () => buildSupervisorBrief(researchNote),
-    [researchNote],
+  const selectedIndicatorRows = useMemo(
+    () =>
+      (pipeline?.signals_data ?? signals?.signals_data ?? []).filter(
+        (row) => row.ticker === selectedTicker,
+      ),
+    [pipeline?.signals_data, signals?.signals_data, selectedTicker],
   );
 
   const allocationTotal = weights.reduce(
@@ -475,6 +678,30 @@ export default function Home() {
     0,
   );
   const ibkrConnected = ibkrState === "ready" && Boolean(ibkrStatus?.connected);
+
+  const refreshHoldings = useCallback(async (force = false) => {
+    if (!force && !ibkrConnected) {
+      setMessage("Connect to IBKR before loading current holdings.");
+      return;
+    }
+
+    setHoldingsState("loading");
+    try {
+      const response = await apiRequest<{ holdings: HoldingRow[] }>(
+        "/portfolio/holdings",
+      );
+      setHoldings(response.holdings ?? []);
+      setHoldingsState("ready");
+      setMessage(
+        response.holdings.length
+          ? `Loaded ${response.holdings.length} current IBKR holdings.`
+          : "IBKR is connected, but no current holdings were returned.",
+      );
+    } catch (error) {
+      setHoldingsState("error");
+      setMessage(error instanceof Error ? error.message : "Holdings query failed.");
+    }
+  }, [ibkrConnected]);
 
   useEffect(() => {
     let isMounted = true;
@@ -512,9 +739,12 @@ export default function Home() {
       .then((status) => {
         setIbkrStatus(status);
         setIbkrState(status.connected ? "ready" : "idle");
+        if (status.connected) {
+          void refreshHoldings(true);
+        }
       })
       .catch(() => setIbkrState("error"));
-  }, []);
+  }, [refreshHoldings]);
 
   async function checkHealth() {
     setBackendState("loading");
@@ -549,6 +779,9 @@ export default function Home() {
         response.message ??
           `IBKR connected on ${response.host ?? "127.0.0.1"}:${response.port ?? ""}.`,
       );
+      if (response.connected) {
+        await refreshHoldings(true);
+      }
     } catch (error) {
       setIbkrState("error");
       setMessage(error instanceof Error ? error.message : "IBKR connection failed.");
@@ -572,7 +805,6 @@ export default function Home() {
           interval: "1d",
         }),
       });
-      setMarketData(response.data);
       setMessage(
         `Loaded ${response.data.length.toLocaleString()} market rows for ${workingTickers.length} tickers.`,
       );
@@ -593,7 +825,7 @@ export default function Home() {
       method: "POST",
       body: JSON.stringify({
         tickers: null,
-        period: "3y",
+        period: "5y",
         interval: "1mo",
       }),
     });
@@ -602,21 +834,9 @@ export default function Home() {
       throw new Error("No market data returned for automatic universe discovery.");
     }
 
-    setMarketData(response.data);
-
-    const signalResponse = await apiRequest<SignalsResult>("/signals/generate", {
-      method: "POST",
-      body: JSON.stringify({ market_data: response.data }),
-    });
-
-    setSignals(signalResponse);
-
-    const bullishUniverse =
-      signalResponse.bullish_tickers.length > 0
-        ? signalResponse.bullish_tickers
-        : Array.from(new Set(response.data.map((row) => row.ticker)));
-    const rankedTickers = latestMonthlyReturns(response.data, bullishUniverse)
-      .slice(0, Math.max(numSignals, 1))
+    const availableTickers = Array.from(new Set(response.data.map((row) => row.ticker)));
+    const rankedTickers = latestMonthlyReturns(response.data, availableTickers)
+      .slice(0, Math.max(numSignals * 3, numSignals, 1))
       .map((row) => row.ticker);
 
     if (rankedTickers.length === 0) {
@@ -624,11 +844,7 @@ export default function Home() {
     }
 
     setTickersInput(rankedTickers.join(", "));
-    setMessage(
-      signalResponse.bullish_tickers.length > 0
-        ? `Universe populated with ${rankedTickers.length} bullish stocks ranked by latest monthly return.`
-        : `Universe populated with ${rankedTickers.length} top monthly performers because no strict bullish signals were found.`,
-    );
+    setMessage(`Universe populated with ${rankedTickers.length} highest monthly performers for signal screening.`);
     return rankedTickers;
   }
 
@@ -637,8 +853,8 @@ export default function Home() {
     if (response.allocation_tickers?.length) {
       setTickersInput(response.allocation_tickers.join(", "));
     }
-    if (response.market_data) {
-      setMarketData(response.market_data);
+    if (response.weights?.[0]?.ticker) {
+      setSelectedTicker(response.weights[0].ticker);
     }
     if (response.signals_data) {
       setSignals({
@@ -665,7 +881,7 @@ export default function Home() {
       method: "POST",
       body: JSON.stringify({
         tickers: workingTickers,
-        lookback_days: lookbackDays,
+        lookback_months: lookbackMonths,
         num_signals: numSignals,
       }),
     });
@@ -676,25 +892,20 @@ export default function Home() {
   async function generateSignals() {
     setWorkflowState("loading");
     try {
-      let rows = marketData;
       let workingTickers = tickers;
       if (workingTickers.length === 0) {
         workingTickers = await discoverBullishUniverse();
-        rows = [];
       }
-      if (rows.length === 0) {
-        setMessage("Requesting market data before signal generation...");
-        const response = await apiRequest<{ data: MarketRow[] }>("/market-data", {
-          method: "POST",
-          body: JSON.stringify({
-            tickers: workingTickers,
-            period: "1y",
-            interval: "1d",
-          }),
-        });
-        rows = response.data;
-        setMarketData(rows);
-      }
+      setMessage("Requesting completed-month market data before signal generation...");
+      const response = await apiRequest<{ data: MarketRow[] }>("/market-data", {
+        method: "POST",
+        body: JSON.stringify({
+          tickers: workingTickers,
+          period: "5y",
+          interval: "1mo",
+        }),
+      });
+      const rows = response.data;
 
       if (rows.length === 0) {
         setWorkflowState("error");
@@ -704,9 +915,17 @@ export default function Home() {
 
       setWorkflowState("loading");
       setMessage("Generating technical signals...");
+      const rankedTickers = latestMonthlyReturns(rows, workingTickers)
+        .slice(0, Math.max(numSignals * 3, numSignals, 1))
+        .map((row) => row.ticker);
+      const signalRows = rows.filter((row) => rankedTickers.includes(row.ticker));
+      if (rankedTickers.length > 0) {
+        setTickersInput(rankedTickers.join(", "));
+      }
+
       const signalResponse = await apiRequest<SignalsResult>("/signals/generate", {
         method: "POST",
-        body: JSON.stringify({ market_data: rows }),
+        body: JSON.stringify({ market_data: signalRows }),
       });
       setSignals(signalResponse);
       setMessage(
@@ -731,7 +950,7 @@ export default function Home() {
         method: "POST",
         body: JSON.stringify({
           tickers: workingTickers,
-          lookback_days: lookbackDays,
+          lookback_months: lookbackMonths,
           num_signals: numSignals,
         }),
       });
@@ -763,7 +982,7 @@ export default function Home() {
           tickers: workingTickers,
           source_context: researchNote,
           pipeline_results: pipelineResults,
-          lookback_days: lookbackDays,
+          lookback_months: lookbackMonths,
           num_signals: numSignals,
         }),
       });
@@ -795,12 +1014,11 @@ export default function Home() {
           tickers: workingTickers,
           sellside_research: sellsideResearch,
           pipeline_results: pipelineResults,
-          lookback_days: lookbackDays,
+          lookback_months: lookbackMonths,
           num_signals: numSignals,
         }),
       });
 
-      setSupervisorContext(response.context ?? "");
       setSupervisorAgentOutput(response.output);
       setMessage("Supervisor agent output generated.");
       setWorkflowState("ready");
@@ -808,43 +1026,6 @@ export default function Home() {
       setWorkflowState("error");
       setMessage(
         error instanceof Error ? error.message : "Supervisor agent run failed.",
-      );
-    }
-  }
-
-  async function buildSupervisorContext() {
-    setWorkflowState("loading");
-    setMessage("Building supervisor context...");
-    try {
-      const workingTickers =
-        tickers.length > 0 ? tickers : await discoverBullishUniverse();
-      const response = await apiRequest<{ context: string }>(
-        "/agents/supervisor/context",
-        {
-          method: "POST",
-          body: JSON.stringify({
-            tickers: workingTickers,
-            sellside_research: supervisorBrief,
-            pipeline_results: pipeline ?? {
-              status: "not_run",
-              bullish_tickers: bullish,
-              bearish_tickers: bearish,
-              weights,
-              market_data: marketData,
-              signals_data: signals?.signals_data ?? [],
-            },
-            lookback_days: lookbackDays,
-            num_signals: numSignals,
-          }),
-        },
-      );
-      setSupervisorContext(response.context);
-      setMessage("Supervisor context generated.");
-      setWorkflowState("ready");
-    } catch (error) {
-      setWorkflowState("error");
-      setMessage(
-        error instanceof Error ? error.message : "Supervisor context failed.",
       );
     }
   }
@@ -876,6 +1057,53 @@ export default function Home() {
       setMessage(error instanceof Error ? error.message : "Trade execution failed.");
     } finally {
       setExecutingTicker(null);
+    }
+  }
+
+  async function executeSell(symbol: string, quantity?: number) {
+    if (!ibkrConnected) {
+      setMessage("Connect to IBKR before executing sells.");
+      return;
+    }
+
+    const holding = holdings.find((row) => row.symbol === symbol);
+    const availableShares = Math.max(0, Math.floor(Number(holding?.position ?? 0)));
+    if (availableShares <= 0) {
+      setMessage(`No long shares are available to sell for ${symbol}.`);
+      return;
+    }
+    if (quantity !== undefined && (!Number.isInteger(quantity) || quantity < 1 || quantity > availableShares)) {
+      setMessage(`Sell quantity for ${symbol} must be between 1 and ${availableShares} shares.`);
+      return;
+    }
+
+    setExecutingSellTicker(symbol);
+    setMessage(
+      quantity === undefined
+        ? `Submitting an order to sell all ${availableShares} shares of ${symbol}...`
+        : `Submitting an order to sell ${quantity} shares of ${symbol}...`,
+    );
+    try {
+      const body: { ticker: string; quantity?: number; dry_run: boolean } = {
+        ticker: symbol,
+        dry_run: false,
+      };
+      if (quantity !== undefined) {
+        body.quantity = quantity;
+      }
+      const response = await apiRequest<OrderExecutionResult>("/orders/sell", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      setLastOrderResult(response);
+      setMessage(
+        `IBKR sell order ${response.trade?.order_id ?? "pending"}: ${response.trade?.quantity ?? 0} shares of ${symbol}. Status: ${response.trade?.status ?? "pending"}.`,
+      );
+      await refreshHoldings(true);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Sell execution failed.");
+    } finally {
+      setExecutingSellTicker(null);
     }
   }
 
@@ -940,13 +1168,13 @@ export default function Home() {
 
             <div className="field-grid">
               <div className="field">
-                <label htmlFor="lookback">Lookback (in days)</label>
+                <label htmlFor="lookback">Lookback (in months)</label>
                 <input
                   id="lookback"
                   type="number"
-                  min={15}
-                  value={lookbackDays}
-                  onChange={(event) => setLookbackDays(Number(event.target.value))}
+                  min={1}
+                  value={lookbackMonths}
+                  onChange={(event) => setLookbackMonths(Number(event.target.value))}
                 />
               </div>
               <div className="field">
@@ -987,25 +1215,12 @@ export default function Home() {
                 rows={6}
               />
             </div>
-            <div className="field">
-              <label htmlFor="supervisor-brief">Supervisor rationale brief</label>
-              <textarea
-                id="supervisor-brief"
-                value={supervisorBrief}
-                readOnly
-                rows={8}
-                className="readonly-textarea"
-              />
-            </div>
             <div className="button-stack">
               <button type="button" onClick={runResearchAgent}>
                 Run research agent
               </button>
               <button type="button" onClick={runSupervisorAgent}>
                 Run supervisor agent
-              </button>
-              <button type="button" onClick={buildSupervisorContext}>
-                Build supervisor context
               </button>
               <button type="button" onClick={previewExecution} className="primary">
                 Preview rebalance
@@ -1050,7 +1265,14 @@ export default function Home() {
                     <div className="allocation-row" key={row.ticker}>
                       <div className="allocation-row-header">
                         <div className="allocation-row-label">
-                          <strong>{row.ticker}</strong>
+                          <button
+                            type="button"
+                            className={`ticker-select ${selectedTicker === row.ticker ? "selected" : ""}`}
+                            onClick={() => setSelectedTicker(row.ticker)}
+                            aria-pressed={selectedTicker === row.ticker}
+                          >
+                            {row.ticker}
+                          </button>
                           <span>{formatPercent(row.weights)}</span>
                         </div>
                         <button
@@ -1110,45 +1332,97 @@ export default function Home() {
             </section>
           </div>
 
+          <section className="panel holdings-panel">
+            <div className="panel-heading">
+              <div>
+                <p className="eyebrow">Interactive Brokers</p>
+                <h2>Current holdings</h2>
+              </div>
+              <div className="holdings-actions">
+                <span className={`pill ${holdingsState}`}>
+                  {holdingsState === "ready" ? `${holdings.length} positions` : holdingsState}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => refreshHoldings()}
+                  disabled={!ibkrConnected || holdingsState === "loading"}
+                >
+                  Refresh holdings
+                </button>
+              </div>
+            </div>
+            {holdings.length > 0 ? (
+              <div className="holdings-list">
+                {holdings.map((holding) => {
+                  const availableShares = Math.max(0, Math.floor(Number(holding.position ?? 0)));
+                  const enteredAmount = sellAmounts[holding.symbol] ?? "";
+                  const sellAmount = Number(enteredAmount);
+                  const isSelling = executingSellTicker === holding.symbol;
+                  return (
+                    <div className="holding-row" key={`${holding.account ?? "account"}-${holding.symbol}`}>
+                      <div className="holding-identity">
+                        <strong>{holding.symbol}</strong>
+                        <span>{availableShares.toLocaleString()} shares</span>
+                      </div>
+                      <div className="holding-actions">
+                        <input
+                          aria-label={`Shares to sell for ${holding.symbol}`}
+                          type="number"
+                          min={1}
+                          max={availableShares}
+                          step={1}
+                          value={enteredAmount}
+                          onChange={(event) =>
+                            setSellAmounts((current) => ({
+                              ...current,
+                              [holding.symbol]: event.target.value,
+                            }))
+                          }
+                          placeholder="Shares"
+                          disabled={isSelling || availableShares <= 0}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => executeSell(holding.symbol, Math.floor(sellAmount))}
+                          disabled={isSelling || availableShares <= 0 || !Number.isInteger(sellAmount) || sellAmount < 1 || sellAmount > availableShares}
+                        >
+                          Sell amount
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => executeSell(holding.symbol)}
+                          disabled={isSelling || availableShares <= 0}
+                        >
+                          {isSelling ? "Selling..." : "Sell all"}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="empty-state">
+                {ibkrConnected
+                  ? "No current holdings returned from IBKR."
+                  : "Connect to IBKR to query current holdings."}
+              </p>
+            )}
+          </section>
+
           <section className="panel table-panel">
             <div className="panel-heading">
               <div>
                 <p className="eyebrow">Latest Indicators</p>
-                <h2>Signal data snapshot</h2>
+                <h2>{selectedTicker ?? "Signal data snapshot"}</h2>
               </div>
             </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Ticker</th>
-                    <th>Date</th>
-                    <th>Close</th>
-                    <th>Fast RSI</th>
-                    <th>MACD Hist</th>
-                    <th>Volume</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {latestSignals.length > 0 ? (
-                    latestSignals.map((row, index) => (
-                      <tr key={`${row.ticker}-${row.date}-${index}`}>
-                        <td>{row.ticker}</td>
-                        <td>{row.date ? String(row.date).slice(0, 10) : "--"}</td>
-                        <td>{Number(row.close ?? 0).toFixed(2)}</td>
-                        <td>{Number(row._FAST_RSI ?? 0).toFixed(1)}</td>
-                        <td>{Number(row._MACD_Hist ?? 0).toFixed(3)}</td>
-                        <td>{Number(row.volume ?? 0).toLocaleString()}</td>
-                      </tr>
-                    ))
-                  ) : (
-                    <tr>
-                      <td colSpan={6}>No signal rows available.</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+            {selectedTicker ? (
+              <SignalChart ticker={selectedTicker} rows={selectedIndicatorRows} />
+            ) : (
+              <p className="empty-state chart-empty-state">
+                Select a ticker in Draft portfolio weights to inspect its indicator history.
+              </p>
+            )}
           </section>
 
           <div className="content-grid lower-grid">
@@ -1180,19 +1454,6 @@ export default function Home() {
           </div>
 
           <div className="content-grid lower-grid">
-            <section className="panel text-panel">
-              <div className="panel-heading">
-                <div>
-                  <p className="eyebrow">Supervisor</p>
-                  <h2>Review context</h2>
-                </div>
-              </div>
-              <MarkdownMemo
-                content={supervisorContext}
-                placeholder="Supervisor context will appear here."
-              />
-            </section>
-
             <section className="panel text-panel">
               <div className="panel-heading">
                 <div>

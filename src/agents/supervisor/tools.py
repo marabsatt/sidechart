@@ -182,14 +182,14 @@ def generate_trading_signals(market_data: list[Dict[str, Any]]) -> Dict[str, Any
 @function_tool
 def optimize_dev_portfolio_weights(
     tickers: list[str],
-    lookback_days: int = 30,
+    lookback_months: int = 3,
 ) -> Dict[str, Any]:
     """
     Call contracts.dev.risk.port_opt to create draft target allocation weights.
 
     Args:
         tickers: Ticker symbols to optimize
-        lookback_days: Historical lookback window used by the optimizer
+        lookback_months: Historical lookback window in months used by the optimizer
 
     Returns:
         Dictionary containing target weight records
@@ -205,11 +205,11 @@ def optimize_dev_portfolio_weights(
     try:
         from contracts.dev.risk import port_opt
 
-        weights_df = port_opt(normalized_tickers, lookback_days=lookback_days)
+        weights_df = port_opt(normalized_tickers, lookback_months=lookback_months)
         return {
             "success": True,
             "tickers": normalized_tickers,
-            "lookback_days": lookback_days,
+            "lookback_months": lookback_months,
             "weights": _records_from_dataframe(weights_df),
         }
     except Exception as e:
@@ -217,7 +217,7 @@ def optimize_dev_portfolio_weights(
             "success": False,
             "error": str(e),
             "tickers": normalized_tickers,
-            "lookback_days": lookback_days,
+            "lookback_months": lookback_months,
             "weights": [],
         }
 

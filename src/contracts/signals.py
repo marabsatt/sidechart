@@ -140,7 +140,7 @@ def signal_generator(market_data: pd.DataFrame) -> tuple:
             
             # Get the latest row
             latest = ticker_data.iloc[-1]
-            prev = ticker_data.iloc[-2] if len(ticker_data) > 1 else ticker_data.iloc[-1]
+            previous = ticker_data.iloc[-2]
 
             indicator_columns = [
                 '_EMA_5',
@@ -151,37 +151,31 @@ def signal_generator(market_data: pd.DataFrame) -> tuple:
                 '_Signal_Line',
                 '_MACD_Hist',
                 'close',
+                '_prev_volume',
+                '_avg_volume_3m',
             ]
             has_indicators = all(pd.notna(latest[column]) for column in indicator_columns)
             
-            # Determine if the stock is bullish based on technical indicators
+            # Match the monthly momentum confirmation used by the source
+            # notebook: trend, momentum, price, and participation must all
+            # confirm on the latest completed observation.
             trend_confirmation = latest['_EMA_5'] > latest['_EMA_15']
-            rsi_confirmation = (
-                latest['_FAST_RSI'] >= latest['_SLOW_RSI'] and
-                latest['_FAST_RSI'] > 50
+            rsi_confirmation = latest['_FAST_RSI'] > latest['_SLOW_RSI']
+            macd_confirmation = latest['_MACD'] > latest['_Signal_Line']
+            histogram_confirmation = (
+                latest['_MACD_Hist'] > 0 and
+                latest['_MACD_Hist'] > ticker_data['_MACD_Hist'].iloc[-2]
             )
-            macd_confirmation = (
-                latest['_MACD'] > latest['_Signal_Line'] and
-                latest['_MACD_Hist'] > 0
-            )
-            price_confirmation = latest['close'] > prev['close']
-            volume_confirmation = (
-                pd.notna(latest['volume']) and
-                pd.notna(latest['_avg_volume_3m']) and
-                latest['volume'] >= latest['_avg_volume_3m']
-            )
-            confirmation_count = sum(
-                [
-                    rsi_confirmation,
-                    macd_confirmation,
-                    volume_confirmation,
-                ]
-            )
+            price_confirmation = latest['close'] > previous['close']
+            volume_confirmation = latest['_prev_volume'] > latest['_avg_volume_3m']
             is_bullish = (
                 has_indicators and
                 trend_confirmation and
+                macd_confirmation and
+                rsi_confirmation and
+                histogram_confirmation and
                 price_confirmation and
-                confirmation_count >= 2
+                volume_confirmation
             )
             ticker_data['_Signal'] = 'bearish'
             

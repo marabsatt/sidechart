@@ -6,10 +6,38 @@ import pandas as pd
 
 from backend import server
 from contracts.dev import pipeline
+from contracts.dev.portfolio import get_top_monthly_performers
 from contracts.dev.risk import _complete_weights
+from contracts import signals
 
 
 class PipelineSelectionTests(unittest.TestCase):
+    def test_monthly_rank_uses_last_completed_month(self):
+        current_month = pd.Timestamp.now().to_period("M")
+        months = [current_month - offset for offset in (3, 2, 1, 0)]
+        rows = []
+        closes = {
+            "A": [100, 110, 100, 999],
+            "B": [100, 100, 120, 1],
+        }
+        for ticker, values in closes.items():
+            rows.extend(
+                {
+                    "ticker": ticker,
+                    "date": period.start_time,
+                    "close": close,
+                }
+                for period, close in zip(months, values)
+            )
+
+        ranked = get_top_monthly_performers(
+            ["A", "B"],
+            keep=2,
+            market_data=pd.DataFrame(rows),
+        )
+
+        self.assertEqual(ranked, ["B", "A"])
+
     def test_selected_positions_keep_positive_trade_weights(self):
         raw = pd.DataFrame({"ticker": ["A", "B", "C"], "weights": [0.8, 0.2, 0.0]})
         result = _complete_weights(raw, ["A", "B", "C"])
@@ -56,7 +84,7 @@ class PipelineSelectionTests(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["bullish_tickers"], ["B3", "B2"])
         self.assertEqual(result["allocation_tickers"], ["B3", "B2"])
-        self.assertEqual(result["screened_bullish_tickers"], ["B1", "B2", "B3"])
+        self.assertEqual(result["screened_bullish_tickers"], ["B3", "B2", "B1"])
         self.assertEqual(result["weights"]["ticker"].tolist(), ["B3", "B2"])
 
     def test_scans_later_index_batches_to_fill_positions(self):
@@ -67,7 +95,7 @@ class PipelineSelectionTests(unittest.TestCase):
                 for date, close in (
                     ("2026-07-31", 100),
                     ("2026-08-31", 110),
-                    ("2026-09-30", 120),
+                    ("2026-09-30", 130 if ticker.startswith("B") else 111),
                 )
             ], columns=["ticker", "date", "close"])
 
@@ -91,6 +119,39 @@ class PipelineSelectionTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["bullish_tickers"], ["B1", "B2"])
+
+
+class SignalRuleTests(unittest.TestCase):
+    def test_bullish_requires_ema_macd_and_fast_rsi_comparisons(self):
+        rows = pd.DataFrame({
+            "ticker": ["TEST"] * 40,
+            "date": pd.date_range("2026-01-01", periods=40),
+            "close": range(100, 140),
+            "volume": [1000] * 39 + [100],
+        })
+
+        def fake_rsi(data, periods):
+            return pd.Series([60 if periods == 5 else 50] * len(data), index=data.index)
+
+        def fake_macd(data, **_kwargs):
+            return (
+                pd.Series([2.0] * len(data), index=data.index),
+                pd.Series([1.0] * len(data), index=data.index),
+                pd.Series(range(len(data)), index=data.index, dtype=float),
+            )
+
+        def fake_ema(data, period):
+            return pd.Series([2.0 if period == 5 else 1.0] * len(data), index=data.index)
+
+        with (
+            patch.object(signals, "rsi", side_effect=fake_rsi),
+            patch.object(signals, "macd", side_effect=fake_macd),
+            patch.object(signals, "ema", side_effect=fake_ema),
+        ):
+            bullish, bearish, _ = signals.signal_generator(rows)
+
+        self.assertEqual(bullish, ["TEST"])
+        self.assertEqual(bearish, [])
 
 
 class WeightedOrderTests(unittest.IsolatedAsyncioTestCase):
@@ -158,6 +219,49 @@ class WeightedOrderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["trade"]["order_id"], 123)
         self.assertEqual(response["trade"]["status"], "Submitted")
         self.assertEqual(response["sizing"]["target_notional"], 2500)
+
+    async def test_holdings_endpoint_and_partial_sell_use_ibkr_positions(self):
+        class FakeIB:
+            def __init__(self):
+                self.position = SimpleNamespace(
+                    account="DU123",
+                    contract=SimpleNamespace(symbol="NVDA", exchange="SMART", currency="USD"),
+                    position=12.0,
+                    avgCost=100.0,
+                )
+                self.submitted = None
+
+            def isConnected(self):
+                return True
+
+            def positions(self):
+                return [self.position]
+
+            async def qualifyContractsAsync(self, contract):
+                return [contract]
+
+            def placeOrder(self, contract, order):
+                order.orderId = 456
+                self.submitted = (contract, order)
+                return SimpleNamespace(
+                    contract=contract,
+                    order=order,
+                    orderStatus=SimpleNamespace(status="Submitted", filled=0, remaining=5),
+                    log=[],
+                )
+
+        fake_ib = FakeIB()
+        with patch.object(server, "IB_CONNECTION", fake_ib):
+            holdings = await server.get_current_holdings()
+            response = await server.sell_order(
+                server.OrderRequest(ticker="NVDA", quantity=5, dry_run=False)
+            )
+
+        self.assertEqual(holdings["holdings"][0]["symbol"], "NVDA")
+        self.assertEqual(holdings["holdings"][0]["position"], 12.0)
+        self.assertEqual(fake_ib.submitted[1].action, "SELL")
+        self.assertEqual(fake_ib.submitted[1].totalQuantity, 5)
+        self.assertEqual(response["trade"]["order_id"], 456)
 
 
 if __name__ == "__main__":

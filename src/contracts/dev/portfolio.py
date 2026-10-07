@@ -35,14 +35,20 @@ def pflio(DF: pd.DataFrame, keep: int, remove: int) -> list:
     return portfolio
 
 
-def get_top_performers(bullish_tickers: list, keep: int = 20, lookback_days: int = 30) -> list:
+def get_top_performers(
+    bullish_tickers: list,
+    keep: int = 20,
+    lookback_months: int = 1,
+    lookback_days: int | None = None,
+) -> list:
     '''
     Calculate returns for bullish tickers and return the top performers
 
     Args:
         bullish_tickers (list): List of ticker symbols identified as bullish
         keep (int): Number of top performers to return
-        lookback_days (int): Number of days to look back for returns calculation
+        lookback_months (int): Number of months to look back for returns calculation
+        lookback_days (int | None): Deprecated compatibility alias
     
     Returns:
         list: Top performing ticker symbols
@@ -51,7 +57,9 @@ def get_top_performers(bullish_tickers: list, keep: int = 20, lookback_days: int
         return []
     
     try:
-        start_date = (datetime.now() - timedelta(days=lookback_days)).strftime('%Y-%m-%d')
+        if lookback_days is not None:
+            lookback_months = max(1, round(lookback_days / 30))
+        start_date = (datetime.now() - timedelta(days=max(lookback_months, 1) * 31)).strftime('%Y-%m-%d')
         market_data = get_market_data(bullish_tickers, start_date=start_date)
         
         if market_data.empty:
@@ -81,7 +89,7 @@ def get_top_monthly_performers(
     tickers: list, keep: int = 20, market_data: pd.DataFrame | None = None
 ) -> list:
     '''
-    Rank tickers by their latest month-over-month close return.
+    Rank tickers by the return for the last completed calendar month.
 
     Args:
         tickers (list): Candidate ticker symbols, usually bullish tickers.
@@ -95,7 +103,7 @@ def get_top_monthly_performers(
 
     try:
         if market_data is None:
-            market_data = get_market_data(tickers, period='6mo', interval='1mo')
+            market_data = get_market_data(tickers, period='5y', interval='1mo')
         if market_data.empty:
             return []
 
@@ -108,11 +116,15 @@ def get_top_monthly_performers(
             ticker_data['close'] = pd.to_numeric(ticker_data['close'], errors='coerce')
             ticker_data = ticker_data.dropna(subset=['date', 'close']).sort_values('date')
             monthly_closes = ticker_data.groupby(ticker_data['date'].dt.to_period('M'))['close'].last()
-            if len(monthly_closes) < 2:
+            current_month = pd.Timestamp.now().to_period('M')
+            completed_closes = monthly_closes[monthly_closes.index < current_month]
+            if len(completed_closes) < 2:
+                completed_closes = monthly_closes
+            if len(completed_closes) < 2:
                 continue
 
-            previous_close = monthly_closes.iloc[-2]
-            latest_close = monthly_closes.iloc[-1]
+            previous_close = completed_closes.iloc[-2]
+            latest_close = completed_closes.iloc[-1]
             if previous_close > 0:
                 returns_data[ticker] = (latest_close - previous_close) / previous_close
 
