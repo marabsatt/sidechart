@@ -1,0 +1,19 @@
+[project]
+name = "ingest"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "marabsatt", email = "mitchelrabsatt@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "boto3>=1.43.114",
+]
+
+[project.scripts]
+ingest = "ingest:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
