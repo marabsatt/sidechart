@@ -53,8 +53,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Memory directory
-MEMORY_DIR = ROOT_DIR / "memory"
+# Memory directory. AWS Lambda keeps the image filesystem read-only, so the
+# researcher service can point this at /tmp without changing local behavior.
+MEMORY_DIR = Path(os.getenv("SIDECHART_MEMORY_DIR", str(ROOT_DIR / "memory")))
 MEMORY_DIR.mkdir(exist_ok=True)
 
 PERSONALITY = """

@@ -24,13 +24,18 @@ RUN npx -y playwright install --with-deps chromium
 # Install uv for Python dependency management inside the container.
 RUN pip install uv
 
-# Copy dependency metadata first so Docker can cache the install layer.
+# The image is built from the repository root. Copy dependency metadata and
+# workspace manifests first so uv can resolve the same environment as local.
 COPY pyproject.toml uv.lock ./
+COPY src/agents ./src/agents
+COPY backend/ingest ./backend/ingest
 RUN uv sync --frozen --no-install-project
 ENV PATH="/app/.venv/bin:$PATH"
 
-# Copy the application code.
-COPY *.py ./
+# Copy the AWS service, the local API router, and its contracts.
+COPY backend/researcher/*.py ./
+COPY backend/server.py ./backend/server.py
+COPY src ./src
 
 # Add the Lambda Web Adapter so Lambda can proxy HTTP requests to uvicorn.
 COPY --from=lambda-adapter /lambda-adapter /opt/extensions/lambda-adapter

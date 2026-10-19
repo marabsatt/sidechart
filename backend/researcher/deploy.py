@@ -185,11 +185,13 @@ def main():
             "--platform",
             "linux/amd64",
             "--provenance=false",
+            "-f",
+            str(backend_dir / "Dockerfile"),
             "-t",
             local_image,
-            ".",
+            str(repo_root),
         ],
-        cwd=backend_dir,
+        cwd=repo_root,
     )
 
     # Tag for ECR

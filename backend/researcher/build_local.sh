@@ -24,7 +24,8 @@ fi
 docker build \
   --build-arg INSTALL_BUILD_ESSENTIAL=true \
   -t "$IMAGE_NAME" \
-  "$SCRIPT_DIR"
+  -f "$SCRIPT_DIR/Dockerfile" \
+  "$REPO_ROOT"
 
 docker run \
   --rm \
