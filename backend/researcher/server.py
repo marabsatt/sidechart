@@ -167,7 +167,7 @@ def _agent_instructions(tickers: list[str] | None = None) -> str:
     return DEFAULT_RESEARCH_PROMPT
 
 
-def _load_agent_runtime() -> tuple[Any, Any, Any, Any, Any, Any]:
+def _load_agent_runtime() -> tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
     if any(value is None for value in (Agent, Runner, trace, LitellmModel)):
         raise RuntimeError(
             "The AWS researcher dependencies are not installed. "
@@ -176,10 +176,10 @@ def _load_agent_runtime() -> tuple[Any, Any, Any, Any, Any, Any]:
 
     try:
         from .mcp_servers import create_playwright_mcp_server
-        from .tools import ingest_financial_document
+        from .tools import browser_find, browser_search, ingest_financial_document
     except ImportError:
         from mcp_servers import create_playwright_mcp_server
-        from tools import ingest_financial_document
+        from tools import browser_find, browser_search, ingest_financial_document
 
     return (
         Agent,
@@ -187,6 +187,8 @@ def _load_agent_runtime() -> tuple[Any, Any, Any, Any, Any, Any]:
         trace,
         LitellmModel,
         create_playwright_mcp_server,
+        browser_search,
+        browser_find,
         ingest_financial_document,
     )
 
@@ -204,6 +206,8 @@ async def run_research_agent(
         trace_context,
         model_class,
         create_mcp_server,
+        browser_search_tool,
+        browser_find_tool,
         ingest_tool,
     ) = _load_agent_runtime()
 
@@ -219,7 +223,7 @@ async def run_research_agent(
             _trim_for_log(query, max_length=500),
         )
 
-    region = os.environ.get("BEDROCK_REGION", "us-west-2")
+    region = os.environ.get("BEDROCK_REGION", "us-east-1")
     os.environ["AWS_REGION_NAME"] = region
     os.environ["AWS_REGION"] = region
     os.environ["AWS_DEFAULT_REGION"] = region
@@ -238,7 +242,7 @@ async def run_research_agent(
                 name="Sidechart Sell-side Researcher",
                 instructions=agent_instructions,
                 model=model,
-                tools=[ingest_tool],
+                tools=[browser_search_tool, browser_find_tool, ingest_tool],
                 mcp_servers=[playwright_mcp],
             )
             result = await runner.run(
@@ -442,7 +446,7 @@ async def test_bedrock():
     try:
         import boto3
 
-        region = os.environ.get("BEDROCK_REGION", "us-west-2")
+        region = os.environ.get("BEDROCK_REGION", "us-east-1")
         model_id = os.environ.get(
             "RESEARCHER_MODEL", "bedrock/converse/openai.gpt-oss-120b-1:0"
         )
@@ -471,6 +475,8 @@ async def test_bedrock():
             _trace_context,
             model_class,
             _create_mcp_server,
+            _browser_search_tool,
+            _browser_find_tool,
             _ingest_tool,
         ) = _load_agent_runtime()
         model = model_class(model=model_id)
