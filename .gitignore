@@ -174,3 +174,6 @@ override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
+
+# Json congiguration files
+aurora_config.json
