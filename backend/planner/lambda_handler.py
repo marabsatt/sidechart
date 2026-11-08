@@ -18,19 +18,29 @@ try:
 except ImportError:
     pass
 
-# Import database package
-from src import Database
-
-from templates import ORCHESTRATOR_INSTRUCTIONS
-from agent import create_agent, handle_missing_instruments, load_portfolio_summary
-from market import update_instrument_prices
-from observability import observe
+try:
+    from .templates import ORCHESTRATOR_INSTRUCTIONS
+    from .agent import (
+        PlannerContext,
+        create_agent,
+        handle_missing_instruments,
+        load_portfolio_summary,
+    )
+    from .market import update_instrument_prices
+    from .observability import observe
+except ImportError:
+    from templates import ORCHESTRATOR_INSTRUCTIONS
+    from agent import (
+        PlannerContext,
+        create_agent,
+        handle_missing_instruments,
+        load_portfolio_summary,
+    )
+    from market import update_instrument_prices
+    from observability import observe
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-
-# Initialize database
-db = Database()
 
 @retry(
     retry=retry_if_exception_type(RateLimitError),
@@ -38,7 +48,7 @@ db = Database()
     wait=wait_exponential(multiplier=1, min=4, max=60),
     before_sleep=lambda retry_state: logger.info(f"Planner: Rate limit hit, retrying in {retry_state.next_action.sleep} seconds...")
 )
-async def run_orchestrator(job_id: str) -> None:
+async def run_orchestrator(job_id: str, db) -> None:
     """Run the orchestrator agent to coordinate portfolio analysis."""
     try:
         # Update job status to running
@@ -59,7 +69,6 @@ async def run_orchestrator(job_id: str) -> None:
         
         # Run the orchestrator
         with trace("Planner Orchestrator"):
-            from agent import PlannerContext
             agent = Agent[PlannerContext](
                 name="Financial Planner",
                 instructions=ORCHESTRATOR_INSTRUCTIONS,
@@ -124,8 +133,20 @@ def lambda_handler(event, context):
 
             logger.info(f"Planner: Starting orchestration for job {job_id}")
 
+            database = event.get("database")
+            if database is None:
+                return {
+                    'statusCode': 400,
+                    'body': json.dumps({
+                        'error': (
+                            'A database adapter is required for the legacy job-based '
+                            'planner workflow.'
+                        )
+                    })
+                }
+
             # Run the orchestrator
-            asyncio.run(run_orchestrator(job_id))
+            asyncio.run(run_orchestrator(job_id, database))
 
             return {
                 'statusCode': 200,
@@ -145,40 +166,5 @@ def lambda_handler(event, context):
                 })
             }
 
-# For local testing
 if __name__ == "__main__":
-    # Define a test user
-    test_user_id = "test_user_planner_local"
-
-    # Ensure the test user exists before creating a job
-    from src.schemas import UserCreate, JobCreate
-    
-    user = db.users.find_by_clerk_id(test_user_id)
-    if not user:
-        print(f"Creating test user: {test_user_id}")
-        user_create = UserCreate(clerk_user_id=test_user_id, display_name="Test Planner User")
-        db.users.create(user_create.model_dump(), returning='clerk_user_id')
-
-    # Create a test job
-    print("Creating test job...")
-    job_create = JobCreate(
-        clerk_user_id=test_user_id,
-        job_type='portfolio_analysis',
-        request_payload={
-            'analysis_type': 'comprehensive',
-            'test': True
-        }
-    )
-    
-    job = db.jobs.create(job_create.model_dump())
-    job_id = job
-    
-    print(f"Created test job: {job_id}")
-    
-    # Test the handler
-    test_event = {
-        'job_id': job_id
-    }
-    
-    result = lambda_handler(test_event, None)
-    print(json.dumps(result, indent=2))
+    print(json.dumps(lambda_handler({}, None), indent=2))

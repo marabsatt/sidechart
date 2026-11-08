@@ -58,6 +58,18 @@ class PriceTests(unittest.TestCase):
 
 
 class MarketUpdateTests(unittest.TestCase):
+    @patch("backend.planner.market.update_prices_for_symbols")
+    def test_job_portfolio_lookup_uses_generic_user_id(self, update_prices):
+        db = Mock()
+        db.jobs.find_by_id.return_value = {"user_id": "user-123"}
+        db.accounts.find_by_user.return_value = [{"id": "account-1"}]
+        db.positions.find_by_account.return_value = [{"symbol": "AAPL"}]
+
+        market.update_instrument_prices("job-1", db)
+
+        db.accounts.find_by_user.assert_called_once_with("user-123")
+        update_prices.assert_called_once_with({"AAPL"}, db)
+
     @patch("backend.planner.market.get_share_prices")
     def test_updates_only_quotes_returned_by_yfinance(self, get_prices):
         get_prices.return_value = {"AAPL": 123.45}

@@ -27,9 +27,6 @@ def package_lambda():
     
     # Get the directory containing this script
     planner_dir = Path(__file__).parent.absolute()
-    backend_dir = planner_dir.parent
-    project_root = backend_dir.parent
-    
     # Create a temporary directory for packaging
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
@@ -38,7 +35,7 @@ def package_lambda():
         
         print("Creating Lambda package using Docker...")
         
-        # Export exact requirements from uv.lock (excluding the editable database package)
+        # Export exact requirements from uv.lock.
         print("Exporting requirements from uv.lock...")
         requirements_result = run_command(
             ["uv", "export", "--no-hashes", "--no-emit-project"],
@@ -58,17 +55,15 @@ def package_lambda():
         req_file.write_text("\n".join(filtered_requirements))
         
         # Use Docker to install dependencies for Lambda's architecture
-        # The --no-emit-project excludes the current project from requirements
-        # We still need to manually install the database package
+        # The --no-emit-project excludes the current project from requirements.
         docker_cmd = [
             "docker", "run", "--rm",
             "--platform", "linux/amd64",
             "-v", f"{temp_path}:/build",
-            "-v", f"{backend_dir}/database:/database",
             "--entrypoint", "/bin/bash",
             "public.ecr.aws/lambda/python:3.12",
             "-c",
-            """cd /build && pip install --target ./package -r requirements.txt && pip install --target ./package --no-deps /database"""
+            """cd /build && pip install --target ./package -r requirements.txt"""
         ]
         
         run_command(docker_cmd)

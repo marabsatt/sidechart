@@ -29,7 +29,7 @@ def update_instrument_prices(job_id: str, db) -> None:
             logger.error(f"Market: Job {job_id} not found")
             return
 
-        user_id = job['clerk_user_id']
+        user_id = job["user_id"]
 
         # Get all unique symbols from user's positions
         accounts = db.accounts.find_by_user(user_id)

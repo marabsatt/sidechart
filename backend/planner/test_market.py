@@ -1,51 +1,26 @@
-"""
-Test market data fetching
-"""
+#!/usr/bin/env python3
+"""Unit smoke test for planner market-price updates."""
 
-from src import Database
-from market import update_instrument_prices
+from unittest.mock import Mock, patch
 
-def test_market():
-    db = Database()
+try:
+    from .market import update_instrument_prices
+except ImportError:
+    from market import update_instrument_prices
 
-    # Find a user with positions
-    user_id = 'user_30BmVRQvPMVcGt9kWAH4BOy5Cjy'
 
-    # Create a test job
-    job_id = db.jobs.create_job(
-        clerk_user_id=user_id,
-        job_type='test_market',
-        request_payload={'test': True}
-    )
+def test_market_update() -> None:
+    database = Mock()
+    database.jobs.find_by_id.return_value = {"user_id": "user-1"}
+    database.accounts.find_by_user.return_value = [{"id": "account-1"}]
+    database.positions.find_by_account.return_value = [{"symbol": "AAPL"}]
 
-    print(f"Testing market data fetch for job {job_id}")
+    module_name = update_instrument_prices.__module__
+    with patch(f"{module_name}.update_prices_for_symbols") as update_prices:
+        update_instrument_prices("job-1", database)
+        update_prices.assert_called_once_with({"AAPL"}, database)
 
-    # Get initial prices
-    accounts = db.accounts.find_by_user(user_id)
-    symbols = set()
-    for account in accounts:
-        positions = db.positions.find_by_account(account['id'])
-        for position in positions:
-            symbols.add(position['symbol'])
-            instrument = db.instruments.find_by_symbol(position['symbol'])
-            if instrument:
-                print(f"  {position['symbol']}: Current price = ${instrument.get('current_price')}")
-
-    print(f"\nFetching prices for {len(symbols)} symbols...")
-
-    # Update prices
-    update_instrument_prices(job_id, db)
-
-    print("\nAfter update:")
-    # Check updated prices
-    for symbol in symbols:
-        instrument = db.instruments.find_by_symbol(symbol)
-        if instrument:
-            print(f"  {symbol}: Current price = ${instrument.get('current_price')}")
-
-    # Clean up
-    db.jobs.delete(job_id)
-    print(f"\nDeleted test job {job_id}")
 
 if __name__ == "__main__":
-    test_market()
+    test_market_update()
+    print("Planner market smoke test passed")

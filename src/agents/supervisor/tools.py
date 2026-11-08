@@ -137,7 +137,7 @@ def ingest_financial_document(topic: str, analysis: str) -> Dict[str, Any]:
         }
 
 
-@function_tool
+@function_tool(strict_mode=False)
 def generate_trading_signals(market_data: list[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Call contracts.signals.signal_generator for supervisor signal synthesis.
