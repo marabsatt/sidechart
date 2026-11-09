@@ -12,9 +12,11 @@ from agents.extensions.models.litellm_model import LitellmModel
 
 
 if __package__ in (None, ""):
-    repository_root = Path(__file__).resolve().parents[2]
-    if str(repository_root) not in sys.path:
-        sys.path.insert(0, str(repository_root))
+    for candidate in Path(__file__).resolve().parents:
+        if (candidate / "src").is_dir():
+            if str(candidate) not in sys.path:
+                sys.path.insert(0, str(candidate))
+            break
 
 try:
     from .mcp_servers import create_playwright_mcp_server

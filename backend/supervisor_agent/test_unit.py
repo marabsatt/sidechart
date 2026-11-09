@@ -2,6 +2,8 @@ import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
+import pandas as pd
+
 from backend.supervisor_agent import lambda_handler
 from backend.supervisor_agent.templates import supervisor_agent
 from backend.supervisor_agent.tools import SUPERVISOR_TOOLS
@@ -13,6 +15,29 @@ class SupervisorLambdaTests(unittest.TestCase):
     def test_templates_and_tools_are_the_local_agent_objects(self):
         self.assertIs(supervisor_agent, local_supervisor_agent)
         self.assertIs(SUPERVISOR_TOOLS, LOCAL_SUPERVISOR_TOOLS)
+
+    @patch("contracts.dev.pipeline.run_analysis_pipeline")
+    def test_fallback_instructions_use_yfinance_pipeline(self, run_pipeline):
+        run_pipeline.return_value = {
+            "status": "complete",
+            "weights": pd.DataFrame({"ticker": ["MSFT"], "weights": [1.0]}),
+            "bullish_tickers": ["MSFT"],
+            "bearish_tickers": [],
+        }
+
+        instructions = supervisor_agent(
+            tickers=["MSFT"],
+            sellside_research="Research output",
+            lookback_months=6,
+            num_signals=1,
+        )
+
+        run_pipeline.assert_called_once_with(
+            tickers=["MSFT"],
+            lookback_months=6,
+            num_signals=1,
+        )
+        self.assertIn("MSFT", instructions)
 
     @patch(
         "backend.supervisor_agent.lambda_handler.run_supervisor_agent",

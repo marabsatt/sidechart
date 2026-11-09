@@ -177,7 +177,9 @@ def supervisor_agent(
     if pipeline_results is None:
         pipeline_results = {}
         if tickers:
-            from contracts.prod.pipeline import run_analysis_pipeline
+            # Keep fallback analysis on the same yfinance pipeline used by the
+            # rest of the application; no Polygon/Massive key is required.
+            from contracts.dev.pipeline import run_analysis_pipeline
 
             pipeline_results = run_analysis_pipeline(
                 tickers=tickers,

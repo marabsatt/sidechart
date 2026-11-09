@@ -11,9 +11,14 @@ def sellside_agent_instructions(tickers: list[str] | None = None):
         tickers: Optional ticker universe used to generate pipeline context.
     '''
     if tickers:
-        from contracts.prod.pipeline import run_analysis_pipeline
+        # The active market-data pipeline uses yfinance and does not require a
+        # Polygon/Massive API key in local or Lambda environments.
+        from contracts.dev.pipeline import run_analysis_pipeline
 
-        analysis_results = run_analysis_pipeline(tickers=tickers)
+        analysis_results = run_analysis_pipeline(
+            tickers=tickers,
+            num_signals=max(1, len(tickers)),
+        )
         weights_df = analysis_results.get('weights')
     else:
         weights_df = 'Unavailable until a ticker universe is supplied.'

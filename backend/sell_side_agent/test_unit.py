@@ -2,6 +2,8 @@ import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
+import pandas as pd
+
 from backend.sell_side_agent import lambda_handler
 from backend.sell_side_agent.templates import (
     DEFAULT_RESEARCH_PROMPT,
@@ -17,6 +19,17 @@ class SellSideLambdaTests(unittest.TestCase):
     def test_templates_are_the_local_agent_templates(self):
         self.assertIs(DEFAULT_RESEARCH_PROMPT, LOCAL_DEFAULT_RESEARCH_PROMPT)
         self.assertIs(sellside_agent_instructions, local_sellside_agent_instructions)
+
+    @patch("contracts.dev.pipeline.run_analysis_pipeline")
+    def test_instructions_use_yfinance_pipeline(self, run_pipeline):
+        run_pipeline.return_value = {
+            "weights": pd.DataFrame({"ticker": ["MSFT"], "weights": [1.0]})
+        }
+
+        instructions = sellside_agent_instructions(["MSFT"])
+
+        run_pipeline.assert_called_once_with(tickers=["MSFT"], num_signals=1)
+        self.assertIn("MSFT", instructions)
 
     @patch(
         "backend.sell_side_agent.lambda_handler.run_sell_side_agent",

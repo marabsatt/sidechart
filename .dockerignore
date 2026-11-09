@@ -5,3 +5,7 @@
 **/*.pyc
 frontend/node_modules/
 backend/ingest/lambda_function.zip
+backend/**/*_lambda.zip
+terraform/**/.terraform/
+terraform/**/*.tfstate
+terraform/**/*.tfstate.*

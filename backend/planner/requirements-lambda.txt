@@ -1,0 +1,7 @@
+boto3==1.43.114
+litellm==1.83.0
+openai-agents[litellm]==0.24.0
+pandas==3.0.5
+python-dotenv==1.2.3
+tenacity==9.2.1
+yfinance==1.7.0
