@@ -27,6 +27,7 @@ def run_analysis_pipeline(
     num_signals: int = 20,
     signal_threshold_days: int = 5,
     lookback_days: int | None = None,
+    expand_universe: bool = False,
 ) -> dict:
     """
     Run the complete analysis pipeline without execution.
@@ -36,6 +37,9 @@ def run_analysis_pipeline(
         lookback_months (int): Number of months to look back for analysis
         num_signals (int): Number of top performers to select
         signal_threshold_days (int): Minimum days of data required for signals
+        expand_universe (bool): Scan discovery/index symbols when the requested
+            universe cannot fill ``num_signals``. This is disabled by default
+            so an interactive request remains bounded to its supplied tickers.
     
     Returns:
         dict: Results containing bullish tickers, bearish tickers, and calculated weights
@@ -58,9 +62,11 @@ def run_analysis_pipeline(
     if market_data.empty and requested_tickers:
         return {'status': 'failed', 'error': 'No market data retrieved'}
 
-    discovery_tickers = [
-        ticker for ticker in DEFAULT_DISCOVERY_TICKERS if ticker not in scanned
-    ]
+    discovery_tickers = (
+        [ticker for ticker in DEFAULT_DISCOVERY_TICKERS if ticker not in scanned]
+        if expand_universe
+        else []
+    )
     remaining = discovery_tickers
     index_loaded = False
 
@@ -90,6 +96,9 @@ def run_analysis_pipeline(
         top_performers = bullish_tickers[:num_signals]
 
         if len(top_performers) >= num_signals:
+            break
+
+        if not expand_universe:
             break
 
         if next_batch >= len(remaining):

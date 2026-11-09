@@ -473,6 +473,7 @@ class PipelineRequest(BaseModel):
     tickers: list[str]
     lookback_months: int = Field(default=3, gt=0)
     num_signals: int = Field(default=20, gt=0)
+    expand_universe: bool = False
 
 
 class WeightRecord(BaseModel):
@@ -574,6 +575,24 @@ async def get_ibkr_connection_status():
 
 @app.post("/broker/ibkr/connect")
 async def connect_ibkr(request: BrokerConnectRequest):
+    if os.getenv("AWS_LAMBDA_FUNCTION_NAME") and request.host.strip().lower() in {
+        "127.0.0.1",
+        "localhost",
+        "::1",
+        "0.0.0.0",
+    }:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The AWS-hosted SideChart API cannot reach an IBKR Gateway on "
+                "your computer through localhost. In Lambda, 127.0.0.1 is the "
+                "Lambda container itself. Run an IBKR connector beside the "
+                "Gateway with an outbound secure connection to AWS, or host the "
+                "Gateway and connector in an AWS VPC; do not expose the IBKR API "
+                "port directly to the internet."
+            ),
+        )
+
     deadline = monotonic() + request.timeout
     errors: list[str] = []
     ports = list(dict.fromkeys(request.ports or DEFAULT_IB_PORTS))
@@ -788,9 +807,10 @@ async def run_dev_analysis_pipeline(request: PipelineRequest):
 
         result = await asyncio.to_thread(
             run_analysis_pipeline,
-            _normalize_tickers(request.tickers),
-            request.lookback_months,
-            request.num_signals,
+            tickers=_normalize_tickers(request.tickers),
+            lookback_months=request.lookback_months,
+            num_signals=request.num_signals,
+            expand_universe=request.expand_universe,
         )
         return _make_json_safe(result)
     except Exception as exc:

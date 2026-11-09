@@ -98,6 +98,9 @@ type AgentRunResult = {
 const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ??
   "http://127.0.0.1:8000";
+const LONG_RUNNING_API_BASE =
+  process.env.NEXT_PUBLIC_LONG_RUNNING_API_BASE_URL?.replace(/\/$/, "") ??
+  API_BASE;
 
 const DEFAULT_TICKERS = "AAPL, MSFT, NVDA, AMZN, GOOGL, META, JPM, XOM";
 const DEFAULT_RESEARCH_CONTEXT =
@@ -604,10 +607,14 @@ function MarkdownMemo({
   return <div className="agent-output">{blocks}</div>;
 }
 
-async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+async function apiRequestFrom<T>(
+  baseUrl: string,
+  path: string,
+  init?: RequestInit,
+): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(`${API_BASE}${path}`, {
+    response = await fetch(`${baseUrl}${path}`, {
       ...init,
       headers: {
         "Content-Type": "application/json",
@@ -617,7 +624,7 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   } catch (error) {
     const reason = error instanceof Error ? error.message : "network request failed";
     throw new Error(
-      `Unable to reach SideChart API at ${API_BASE}. Confirm the backend is running and that CORS_ORIGINS includes this frontend origin. Details: ${reason}`,
+      `Unable to reach SideChart API at ${baseUrl}. Confirm the backend is running and that CORS allows this frontend origin. Details: ${reason}`,
     );
   }
 
@@ -630,6 +637,17 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(detail);
   }
   return payload as T;
+}
+
+async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  return apiRequestFrom<T>(API_BASE, path, init);
+}
+
+async function longRunningApiRequest<T>(
+  path: string,
+  init?: RequestInit,
+): Promise<T> {
+  return apiRequestFrom<T>(LONG_RUNNING_API_BASE, path, init);
 }
 
 export default function Home() {
@@ -976,7 +994,7 @@ export default function Home() {
       const workingTickers =
         tickers.length > 0 ? tickers : await discoverBullishUniverse();
       const pipelineResults = await ensurePipelineResults(workingTickers);
-      const response = await apiRequest<AgentRunResult>("/agents/research/run", {
+      const response = await longRunningApiRequest<AgentRunResult>("/agents/research/run", {
         method: "POST",
         body: JSON.stringify({
           tickers: workingTickers,
@@ -1008,7 +1026,7 @@ export default function Home() {
       const pipelineResults = await ensurePipelineResults(workingTickers);
       const sellsideResearch =
         researchAgentOutput || researchNote || "No sell-side research output supplied.";
-      const response = await apiRequest<AgentRunResult>("/agents/supervisor/run", {
+      const response = await longRunningApiRequest<AgentRunResult>("/agents/supervisor/run", {
         method: "POST",
         body: JSON.stringify({
           tickers: workingTickers,

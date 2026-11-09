@@ -119,7 +119,10 @@ resource "aws_lambda_function" "researcher" {
   package_type  = "Image"
   image_uri     = var.researcher_image_uri
   role          = aws_iam_role.researcher_lambda_role.arn
-  timeout       = 300
+  # Browser-based research can exceed the CloudFront response window. The
+  # frontend invokes this function URL directly for agent runs, so keep enough
+  # headroom for multi-source research and cold starts.
+  timeout       = 600
   memory_size   = 2048
   architectures = ["x86_64"]
 
@@ -129,12 +132,12 @@ resource "aws_lambda_function" "researcher" {
 
   environment {
     variables = {
-      OPENAI_API_KEY    = var.openai_api_key
+      OPENAI_API_KEY         = var.openai_api_key
       SIDECHART_API_ENDPOINT = var.sidechart_api_endpoint
       SIDECHART_API_KEY      = var.sidechart_api_key
-      BEDROCK_REGION    = var.bedrock_region
-      RESEARCHER_MODEL  = var.researcher_model
-      MCP_LOGGING       = var.mcp_logging
+      BEDROCK_REGION         = var.bedrock_region
+      RESEARCHER_MODEL       = var.researcher_model
+      MCP_LOGGING            = var.mcp_logging
     }
   }
 
@@ -148,6 +151,14 @@ resource "aws_lambda_function_url" "researcher" {
   count              = local.researcher_deployed ? 1 : 0
   function_name      = aws_lambda_function.researcher[0].function_name
   authorization_type = "NONE"
+
+  cors {
+    allow_credentials = false
+    allow_headers     = ["content-type"]
+    allow_methods     = ["GET", "POST"]
+    allow_origins     = ["*"]
+    max_age           = 300
+  }
 }
 
 resource "aws_lambda_permission" "allow_public_function_url_invoke" {
@@ -184,15 +195,15 @@ resource "aws_iam_role" "eventbridge_role" {
 
 # Lambda function for invoking researcher
 resource "aws_lambda_function" "scheduler_lambda" {
-  count         = local.scheduler_active ? 1 : 0
-  function_name = "sidechart-researcher-scheduler"
-  role          = aws_iam_role.lambda_scheduler_role[0].arn
-  filename      = "${path.module}/../../backend/scheduler/lambda_function.zip"
+  count            = local.scheduler_active ? 1 : 0
+  function_name    = "sidechart-researcher-scheduler"
+  role             = aws_iam_role.lambda_scheduler_role[0].arn
+  filename         = "${path.module}/../../backend/scheduler/lambda_function.zip"
   source_code_hash = fileexists("${path.module}/../../backend/scheduler/lambda_function.zip") ? filebase64sha256("${path.module}/../../backend/scheduler/lambda_function.zip") : null
-  handler       = "lambda_function.handler"
-  runtime       = "python3.12"
-  timeout       = 180
-  memory_size   = 256
+  handler          = "lambda_function.handler"
+  runtime          = "python3.12"
+  timeout          = 180
+  memory_size      = 256
 
   environment {
     variables = {

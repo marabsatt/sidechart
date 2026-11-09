@@ -1,3 +1,4 @@
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -79,7 +80,9 @@ class PipelineSelectionTests(unittest.TestCase):
             patch.object(pipeline, "DEFAULT_DISCOVERY_TICKERS", ["B2", "B3"]),
             patch.object(pipeline, "port_opt", side_effect=weights),
         ):
-            result = pipeline.run_analysis_pipeline(["B1", "X"], num_signals=2)
+            result = pipeline.run_analysis_pipeline(
+                ["B1", "X"], num_signals=2, expand_universe=True
+            )
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["bullish_tickers"], ["B3", "B2"])
@@ -115,10 +118,43 @@ class PipelineSelectionTests(unittest.TestCase):
                 "ticker": ["B1", "B2"], "weights": [0.5, 0.5]
             })),
         ):
-            result = pipeline.run_analysis_pipeline([], num_signals=2)
+            result = pipeline.run_analysis_pipeline(
+                [], num_signals=2, expand_universe=True
+            )
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["bullish_tickers"], ["B1", "B2"])
+
+    def test_interactive_pipeline_stays_within_requested_universe(self):
+        def market_data(tickers, **_kwargs):
+            return pd.DataFrame([
+                {"ticker": ticker, "date": date, "close": close}
+                for ticker in tickers
+                for date, close in (
+                    ("2026-07-31", 100),
+                    ("2026-08-31", 110),
+                    ("2026-09-30", 130),
+                )
+            ], columns=["ticker", "date", "close"])
+
+        with (
+            patch.object(pipeline, "get_market_data", side_effect=market_data) as get_data,
+            patch.object(
+                pipeline,
+                "signal_generator",
+                side_effect=lambda df: (["A"], [], df),
+            ),
+            patch.object(
+                pipeline,
+                "port_opt",
+                return_value=pd.DataFrame({"ticker": ["A"], "weights": [1.0]}),
+            ),
+        ):
+            result = pipeline.run_analysis_pipeline(["A"], num_signals=2)
+
+        get_data.assert_called_once_with(["A"], period="5y", interval="1mo")
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["allocation_tickers"], ["A"])
 
 
 class SignalRuleTests(unittest.TestCase):
@@ -155,6 +191,14 @@ class SignalRuleTests(unittest.TestCase):
 
 
 class WeightedOrderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_aws_ibkr_connection_rejects_lambda_localhost(self):
+        with patch.dict(os.environ, {"AWS_LAMBDA_FUNCTION_NAME": "sidechart-researcher"}):
+            with self.assertRaises(server.HTTPException) as raised:
+                await server.connect_ibkr(server.BrokerConnectRequest(timeout=1))
+
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertIn("127.0.0.1 is the Lambda container", raised.exception.detail)
+
     async def test_connect_endpoint_uses_async_ibkr_session(self):
         status = {
             "connected": True,
