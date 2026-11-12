@@ -17,21 +17,25 @@ data "aws_caller_identity" "current" {}
 
 locals {
   agent_directories = {
-    planner          = "planner"
-    classifier       = "classifier"
-    reporter         = "reporter"
-    charter          = "charter"
-    sell_side_agent  = "sell_side_agent"
-    supervisor_agent = "supervisor_agent"
+    planner              = "planner"
+    classifier           = "classifier"
+    reporter             = "reporter"
+    charter              = "charter"
+    sell_side_agent      = "sell_side_agent"
+    supervisor_agent     = "supervisor_agent"
+    ibkr_event_processor = "ibkr_event_processor"
+    ibkr_order_api       = "ibkr_order_api"
   }
 
   agent_repository_names = {
-    planner          = "sidechart-planner"
-    classifier       = "sidechart-classifier"
-    reporter         = "sidechart-reporter"
-    charter          = "sidechart-charter"
-    sell_side_agent  = "sidechart-sell-side-agent"
-    supervisor_agent = "sidechart-supervisor-agent"
+    planner              = "sidechart-planner"
+    classifier           = "sidechart-classifier"
+    reporter             = "sidechart-reporter"
+    charter              = "sidechart-charter"
+    sell_side_agent      = "sidechart-sell-side-agent"
+    supervisor_agent     = "sidechart-supervisor-agent"
+    ibkr_event_processor = "sidechart-ibkr-event-processor"
+    ibkr_order_api       = "sidechart-ibkr-order-api"
   }
 
   agent_source_files = {
@@ -141,6 +145,32 @@ locals {
       ephemeral_storage = 2048
       environment       = local.common_environment
     }
+    ibkr_event_processor = {
+      function_name     = "sidechart-ibkr-event-processor"
+      timeout           = 60
+      memory_size       = 512
+      ephemeral_storage = 512
+      environment = {
+        AURORA_CLUSTER_ARN = var.aurora_cluster_arn
+        AURORA_SECRET_ARN  = var.aurora_secret_arn
+        AURORA_DATABASE    = "sidechart"
+        DEFAULT_AWS_REGION = var.aws_region
+      }
+    }
+    ibkr_order_api = {
+      function_name     = "sidechart-ibkr-order-api"
+      timeout           = 30
+      memory_size       = 512
+      ephemeral_storage = 512
+      environment = {
+        AURORA_CLUSTER_ARN     = var.aurora_cluster_arn
+        AURORA_SECRET_ARN      = var.aurora_secret_arn
+        AURORA_DATABASE        = "sidechart"
+        DEFAULT_AWS_REGION     = var.aws_region
+        IBKR_COMMAND_QUEUE_URL = aws_sqs_queue.ibkr_commands.url
+        IBKR_ACCOUNT_MODE      = "PAPER"
+      }
+    }
   }
 }
 
@@ -169,6 +199,192 @@ resource "aws_sqs_queue" "analysis_jobs" {
   tags = {
     Project = "sidechart"
   }
+}
+
+# The IBKR bridge uses dedicated queues. Reusing analysis_jobs would create
+# competing consumers and allow the local connector to steal planner work.
+resource "aws_sqs_queue" "ibkr_commands_dlq" {
+  name                        = "sidechart-ibkr-commands-dlq.fifo"
+  fifo_queue                  = true
+  content_based_deduplication = false
+  message_retention_seconds   = 1209600
+
+  tags = { Project = "sidechart", Component = "ibkr-connector" }
+}
+
+resource "aws_sqs_queue" "ibkr_commands" {
+  name                        = "sidechart-ibkr-commands.fifo"
+  fifo_queue                  = true
+  content_based_deduplication = false
+  message_retention_seconds   = 86400
+  receive_wait_time_seconds   = 20
+  visibility_timeout_seconds  = 60
+
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.ibkr_commands_dlq.arn
+    maxReceiveCount     = 5
+  })
+
+  tags = { Project = "sidechart", Component = "ibkr-connector" }
+}
+
+resource "aws_sqs_queue" "ibkr_events_dlq" {
+  name                        = "sidechart-ibkr-events-dlq.fifo"
+  fifo_queue                  = true
+  content_based_deduplication = false
+  message_retention_seconds   = 1209600
+
+  tags = { Project = "sidechart", Component = "ibkr-connector" }
+}
+
+resource "aws_sqs_queue" "ibkr_events" {
+  name                        = "sidechart-ibkr-events.fifo"
+  fifo_queue                  = true
+  content_based_deduplication = false
+  message_retention_seconds   = 1209600
+  receive_wait_time_seconds   = 20
+  visibility_timeout_seconds  = 90
+
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.ibkr_events_dlq.arn
+    maxReceiveCount     = 5
+  })
+
+  tags = { Project = "sidechart", Component = "ibkr-connector" }
+}
+
+# This role is intentionally usable only through IAM Roles Anywhere. The local
+# connector gets temporary credentials and no direct database access.
+resource "aws_iam_role" "ibkr_connector" {
+  name = "sidechart-ibkr-connector-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "rolesanywhere.amazonaws.com" }
+      Action    = ["sts:AssumeRole", "sts:SetSourceIdentity", "sts:TagSession"]
+      Condition = {
+        StringEquals = { "aws:SourceAccount" = data.aws_caller_identity.current.account_id }
+      }
+    }]
+  })
+
+  tags = { Project = "sidechart", Component = "ibkr-connector" }
+}
+
+resource "aws_iam_role_policy" "ibkr_connector" {
+  name = "sidechart-ibkr-connector-queues"
+  role = aws_iam_role.ibkr_connector.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "sqs:ReceiveMessage", "sqs:DeleteMessage",
+          "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes"
+        ]
+        Resource = aws_sqs_queue.ibkr_commands.arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["sqs:SendMessage", "sqs:GetQueueAttributes"]
+        Resource = aws_sqs_queue.ibkr_events.arn
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role" "ibkr_event_processor" {
+  name = "sidechart-ibkr-event-processor-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow", Action = "sts:AssumeRole",
+      Principal = { Service = "lambda.amazonaws.com" }
+    }]
+  })
+  tags = { Project = "sidechart", Component = "ibkr-connector" }
+}
+
+resource "aws_iam_role_policy_attachment" "ibkr_event_processor_basic" {
+  role       = aws_iam_role.ibkr_event_processor.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy" "ibkr_event_processor" {
+  name = "sidechart-ibkr-event-processor"
+  role = aws_iam_role.ibkr_event_processor.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
+        Resource = aws_sqs_queue.ibkr_events.arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "rds-data:ExecuteStatement", "rds-data:BeginTransaction",
+          "rds-data:CommitTransaction", "rds-data:RollbackTransaction"
+        ]
+        Resource = var.aurora_cluster_arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue"]
+        Resource = var.aurora_secret_arn
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role" "ibkr_order_api" {
+  name = "sidechart-ibkr-order-api-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow", Action = "sts:AssumeRole",
+      Principal = { Service = "lambda.amazonaws.com" }
+    }]
+  })
+  tags = { Project = "sidechart", Component = "ibkr-connector" }
+}
+
+resource "aws_iam_role_policy_attachment" "ibkr_order_api_basic" {
+  role       = aws_iam_role.ibkr_order_api.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy" "ibkr_order_api" {
+  name = "sidechart-ibkr-order-api"
+  role = aws_iam_role.ibkr_order_api.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["sqs:SendMessage", "sqs:GetQueueAttributes"]
+        Resource = aws_sqs_queue.ibkr_commands.arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "rds-data:ExecuteStatement", "rds-data:BeginTransaction",
+          "rds-data:CommitTransaction", "rds-data:RollbackTransaction"
+        ]
+        Resource = var.aurora_cluster_arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue"]
+        Resource = var.aurora_secret_arn
+      }
+    ]
+  })
 }
 
 # Shared Lambda execution role.
@@ -401,7 +617,9 @@ resource "aws_lambda_function" "agent" {
   for_each = local.lambda_agents
 
   function_name = each.value.function_name
-  role          = aws_iam_role.lambda_agents_role.arn
+  role = each.key == "ibkr_event_processor" ? aws_iam_role.ibkr_event_processor.arn : (
+    each.key == "ibkr_order_api" ? aws_iam_role.ibkr_order_api.arn : aws_iam_role.lambda_agents_role.arn
+  )
   package_type  = "Image"
   image_uri     = "${aws_ecr_repository.agent_images[each.key].repository_url}:${local.agent_image_tags[each.key]}"
   architectures = ["x86_64"]
@@ -432,6 +650,15 @@ resource "aws_lambda_event_source_mapping" "planner_sqs" {
   event_source_arn = aws_sqs_queue.analysis_jobs.arn
   function_name    = aws_lambda_function.agent["planner"].arn
   batch_size       = 1
+}
+
+resource "aws_lambda_event_source_mapping" "ibkr_events" {
+  event_source_arn        = aws_sqs_queue.ibkr_events.arn
+  function_name           = aws_lambda_function.agent["ibkr_event_processor"].arn
+  batch_size              = 10
+  function_response_types = ["ReportBatchItemFailures"]
+
+  depends_on = [aws_iam_role_policy.ibkr_event_processor]
 }
 
 resource "aws_cloudwatch_log_group" "agent_logs" {

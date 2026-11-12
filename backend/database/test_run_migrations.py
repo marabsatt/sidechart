@@ -7,7 +7,7 @@ class MigrationRunnerTests(unittest.TestCase):
     def test_discovers_migrations_in_order(self):
         self.assertEqual(
             [path.name for path in migration_files()],
-            ["001_schema.sql", "002_hitl_trading.sql"],
+            ["001_schema.sql", "002_hitl_trading.sql", "003_ibkr_connector.sql"],
         )
 
     def test_baseline_enables_uuid_extension(self):
@@ -36,6 +36,16 @@ class MigrationRunnerTests(unittest.TestCase):
                 "agent_tokens_audit",
             },
         )
+
+    def test_connector_migration_adds_connector_and_event_tables(self):
+        connector_path = migration_files()[2]
+        statements = split_migration(connector_path.read_text(encoding="utf-8"))
+        tables = {
+            statement.split("CREATE TABLE ", 1)[1].split(" ", 1)[0]
+            for statement in statements
+            if statement.startswith("CREATE TABLE ")
+        }
+        self.assertEqual(tables, {"broker_connectors", "broker_events"})
 
 
 if __name__ == "__main__":

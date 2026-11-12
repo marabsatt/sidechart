@@ -41,6 +41,9 @@ EXPECTED_COLUMNS = {
         "total_qty",
         "filled_qty",
         "created_at",
+        "command_id",
+        "limit_price",
+        "updated_at",
     },
     "executions": {
         "id",
@@ -66,6 +69,29 @@ EXPECTED_COLUMNS = {
         "prompt_tokens",
         "completion_tokens",
         "cost",
+    },
+    "broker_connectors": {
+        "connector_id",
+        "account_mode",
+        "status",
+        "gateway_port",
+        "client_id",
+        "version",
+        "last_heartbeat_at",
+        "last_connected_at",
+        "last_error",
+        "metadata",
+        "updated_at",
+    },
+    "broker_events": {
+        "id",
+        "event_id",
+        "connector_id",
+        "event_type",
+        "order_id",
+        "payload",
+        "occurred_at",
+        "received_at",
     },
 }
 
@@ -110,7 +136,7 @@ def main() -> int:
         print(f"Actual: {application_columns}", file=sys.stderr)
         return 1
 
-    print("Schema verified: 6 application tables with the exact expected columns.")
+    print("Schema verified: 8 application tables with the exact expected columns.")
     return 0
 
 

@@ -47,6 +47,10 @@ data "aws_lambda_function" "supervisor_agent" {
   function_name = data.terraform_remote_state.agents.outputs.lambda_functions["supervisor_agent"]
 }
 
+data "aws_lambda_function" "ibkr_order_api" {
+  function_name = data.terraform_remote_state.agents.outputs.lambda_functions["ibkr_order_api"]
+}
+
 data "aws_cloudfront_cache_policy" "caching_optimized" {
   name = "Managed-CachingOptimized"
 }
@@ -177,6 +181,28 @@ resource "aws_lambda_permission" "supervisor_agent_api" {
   source_arn    = "${aws_apigatewayv2_api.main.execution_arn}/*/POST/agents/supervisor/run"
 }
 
+resource "aws_apigatewayv2_integration" "ibkr_order_api" {
+  api_id                 = aws_apigatewayv2_api.main.id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = data.aws_lambda_function.ibkr_order_api.invoke_arn
+  payload_format_version = "2.0"
+  timeout_milliseconds   = 30000
+}
+
+resource "aws_apigatewayv2_route" "ibkr_order_api" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "POST /broker/ibkr/orders"
+  target    = "integrations/${aws_apigatewayv2_integration.ibkr_order_api.id}"
+}
+
+resource "aws_lambda_permission" "ibkr_order_api" {
+  statement_id  = "AllowSideChartApprovedOrderApi"
+  action        = "lambda:InvokeFunction"
+  function_name = data.aws_lambda_function.ibkr_order_api.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.main.execution_arn}/*/POST/broker/ibkr/orders"
+}
+
 # The browser calls /api/*. CloudFront keeps the selected API cache behavior,
 # removes the prefix, and forwards the original backend route to its origin.
 resource "aws_cloudfront_function" "strip_api_prefix" {
@@ -279,6 +305,23 @@ resource "aws_cloudfront_distribution" "main" {
   }
 
   ordered_cache_behavior {
+    path_pattern               = "/api/broker/ibkr/orders"
+    allowed_methods            = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods             = ["GET", "HEAD"]
+    target_origin_id           = "frontend-api"
+    viewer_protocol_policy     = "redirect-to-https"
+    compress                   = true
+    cache_policy_id            = data.aws_cloudfront_cache_policy.caching_disabled.id
+    origin_request_policy_id   = data.aws_cloudfront_origin_request_policy.all_viewer_except_host.id
+    response_headers_policy_id = data.aws_cloudfront_response_headers_policy.security_headers.id
+
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = aws_cloudfront_function.strip_api_prefix.arn
+    }
+  }
+
+  ordered_cache_behavior {
     path_pattern               = "/api/*"
     allowed_methods            = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
     cached_methods             = ["GET", "HEAD"]
@@ -309,6 +352,7 @@ resource "aws_cloudfront_distribution" "main" {
   }
 
   depends_on = [
+    aws_apigatewayv2_route.ibkr_order_api,
     aws_apigatewayv2_route.supervisor_agent,
     aws_apigatewayv2_stage.default,
   ]

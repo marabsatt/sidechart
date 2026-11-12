@@ -46,6 +46,16 @@ AGENTS = {
         "repository": "sidechart-supervisor-agent",
         "function": "sidechart-supervisor-agent",
     },
+    "ibkr_event_processor": {
+        "directory": "ibkr_event_processor",
+        "repository": "sidechart-ibkr-event-processor",
+        "function": "sidechart-ibkr-event-processor",
+    },
+    "ibkr_order_api": {
+        "directory": "ibkr_order_api",
+        "repository": "sidechart-ibkr-order-api",
+        "function": "sidechart-ibkr-order-api",
+    },
 }
 
 

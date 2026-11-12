@@ -8,6 +8,15 @@ output "sqs_queue_arn" {
   value       = aws_sqs_queue.analysis_jobs.arn
 }
 
+output "ibkr_connector" {
+  description = "Resources used by the local outbound IBKR connector"
+  value = {
+    command_queue_url  = aws_sqs_queue.ibkr_commands.url
+    event_queue_url    = aws_sqs_queue.ibkr_events.url
+    connector_role_arn = aws_iam_role.ibkr_connector.arn
+  }
+}
+
 output "lambda_functions" {
   description = "Names of deployed Lambda functions"
   value = {
