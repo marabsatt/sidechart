@@ -1,205 +1,231 @@
 # SideChart
 
-SideChart is an AI-assisted portfolio research and rebalance workflow. The current build connects a FastAPI backend, reusable trading/research contracts, OpenAI-powered agent synthesis, and a Next.js dashboard.
+![SideChart deployed AWS system architecture](docs/architecture/system_architecture.png)
 
-The application is still under active development. Outputs are intended for research, review, and paper-trading workflows only. They are not personalized investment advice, execution recommendations, or a guarantee of returns.
+SideChart is a human-in-the-loop, agent-assisted market research and paper
+trading platform. It combines a static Next.js application, AWS Lambda agents,
+Amazon Bedrock, quantitative market analysis, Aurora PostgreSQL, and a local
+Interactive Brokers connector.
 
-## Current Development Snapshot
+The database is the source of truth for research signals, supervisor reviews,
+approved orders, executions, portfolio snapshots, connector events, and model
+usage. Agent output never bypasses human review to become an IBKR order.
 
-SideChart now supports an end-to-end local workflow:
+> SideChart is intended for research, human
+> review, and paper-trading workflows. It is not personalized investment advice
+> and does not guarantee investment performance.
 
-1. Load market data for a user-defined ticker universe.
-2. If the Universe field is empty, discover bullish tickers from broad market data and rank them by recent monthly return.
-3. Generate technical bullish/bearish classifications from RSI, EMA, MACD, price action, and volume confirmation.
-4. Run the dev analysis pipeline across the active universe.
-5. Generate risk based draft target weights.
-6. Display optimized weights in the frontend Target Allocation panel.
-7. Trigger researcher and supervisor agents from the frontend.
-8. Render agent outputs as polished markdown memos.
-9. Preview dry-run rebalance payloads before any paper execution path.
+## AWS Architecture
 
-## Architecture
+### Web delivery and API routing
 
-```text
-frontend/             Next.js dashboard for financial workflows
-backend/server.py     FastAPI API layer and local orchestration entrypoint
-src/contracts/        Shared trading contracts
-src/contracts/dev/    Dev market data, portfolio, risk, holdings, and pipeline modules
-src/agents/research/  Sell-side researcher agent prompts/tools
-src/agents/supervisor Supervisor agent prompts/tools and rebalance synthesis context
-scripts/run_local.py  Local runner for backend and frontend together
-```
+The local Next.js frontend is exported as static assets and uploaded to a
+private S3 bucket. CloudFront is the public application entry point and uses an
+Origin Access Control to read the bucket.
 
-## Backend
+CloudFront sends API traffic to two AWS origins:
 
-The backend is implemented in `backend/server.py` and exposes the project through a FastAPI API. It loads environment variables from `.env`, configures local CORS for the frontend, imports the local `src` contracts, and normalizes pandas outputs into JSON safe API responses.
+- General `/api/*` requests go to the researcher Lambda Function URL. That
+  container hosts the FastAPI-compatible market, signal, pipeline, research,
+  portfolio, and dry-run routes.
+- `POST /api/agents/supervisor/run` and
+  `POST /api/broker/ibkr/orders` go through the frontend HTTP API Gateway to
+  their dedicated Lambda functions.
 
-Current backend capabilities include:
+Long-running research requests can call the researcher Function URL directly,
+avoiding the shorter HTTP API integration timeout.
 
-- Health check and API discovery.
-- Market data retrieval from the dev market data contract.
-- S&P 500 and Nasdaq-100 ticker discovery helpers.
-- RSI, EMA, MACD, and full signal-generation endpoints.
-- Dev analysis pipeline execution.
-- Rebalance proposal construction.
-- Current holdings retrieval through the dev holdings contract.
-- Buy/sell order dry run endpoints.
-- Rebalance execution dry run endpoint.
-- Researcher agent prompt and run endpoint.
-- Supervisor context and run endpoint.
-- Optional document ingestion hooks for researcher/supervisor knowledge stores.
+### Agent services
 
-Important local endpoints:
+The AWS agent layer contains these Lambda container images:
 
-```text
-GET  /health
-POST /market-data
-POST /signals/generate
-POST /pipeline/dev/analyze
-POST /execution/rebalance
-POST /agents/research/run
-POST /agents/supervisor/run
-GET  /docs
-```
+| Service | Responsibility | Invocation path |
+|---|---|---|
+| Researcher service | Browser research, Playwright MCP browsing, market pipeline compatibility routes | Lambda Function URL |
+| Supervisor agent | Produces a human-reviewable rebalance proposal; does not execute trades | HTTP API Gateway |
+| Sell-side agent | Dedicated sell-side research runtime | Standalone Lambda invocation |
+| Planner | Coordinates the legacy asynchronous analysis workflow | Analysis-jobs SQS queue |
+| Classifier | Classifies instruments for the planner | Synchronous planner invocation |
+| Reporter | Produces report output and retrieval-assisted analysis | Synchronous planner invocation |
+| Charter | Produces structured chart data | Synchronous planner invocation |
 
-## Contracts
+The agents use Amazon Bedrock through the Agents SDK/LiteLLM integration. The
+researcher can use Playwright MCP for web research and yfinance-backed contracts
+for market data. Reporter retrieval uses S3 Vectors and the serverless SageMaker
+embedding endpoint. CloudWatch contains Lambda logs; Langfuse tracing is
+optional when its environment variables are configured.
 
-The contracts layer contains the reusable financial workflow logic.
+The analysis-jobs queue currently triggers the planner, but the browser and
+researcher routes do not yet publish new jobs to that queue.
 
-### Market Data
+### Data and ingestion
 
-`src/contracts/dev/market_data.py` retrieves yfinance OHLCV data and normalizes it into:
+Aurora PostgreSQL Serverless v2 is accessed through the RDS Data API. Database
+credentials are held in AWS Secrets Manager. Ordered SQL migrations define the
+HITL trading schema:
 
-```text
-ticker, date, open, high, low, close, volume
-```
+- `research_signals`
+- `supervisor_reviews`
+- `orders`
+- `executions`
+- `portfolio_positions`
+- `agent_tokens_audit`
+- `broker_connectors`
+- `broker_events`
 
-When no tickers are supplied, the module attempts to discover a broader universe from S&P 500 and Nasdaq-100 constituents, with a static large-cap fallback list. The automatic universe size is controlled with:
+The separate ingestion REST API uses an API key and invokes the ingestion
+Lambda. Documents are embedded with SageMaker and stored in the S3 Vectors
+research index.
 
-```text
-MARKET_DATA_MAX_TICKERS=120
-```
+The complete relational model is documented in
+[docs/database_schema](docs/database_schema/README.md).
 
-### Signals
+### HITL order and IBKR execution path
 
-`src/contracts/signals.py` generates bullish and bearish classifications using:
-
-- Fast and slow RSI
-- MACD line, signal line, and histogram
-- Fast and slow EMA trend
-- Latest price action
-- Volume confirmation
-
-The signal generator now validates required columns, coerces numeric fields, handles insufficient history explicitly, and adds a `_Signal` marker to the latest row.
-
-### Pipeline
-
-`src/contracts/dev/pipeline.py` orchestrates the current dev analysis flow:
-
-1. Pull market data.
-2. Generate technical signals.
-3. Rank bullish candidates by recent return.
-4. Optimize target weights for the active universe.
-5. Return market data, signals, candidates, top performers, and weights.
-
-The risk optimizer now applies weights across the active Universe rather than only the smaller top-performer set, so the frontend allocation table reflects all tickers under review.
-
-### Risk
-
-`src/contracts/dev/risk.py` uses Riskfolio-Lib to produce draft target weights. It now:
-
-- Deduplicates and normalizes input tickers.
-- Returns equal weights for insufficient data or optimizer failures.
-- Completes the final weight table back to every requested ticker.
-- Normalizes weights to sum to 100%.
-
-## Agents
-
-SideChart currently has two agent workflows.
-
-### Research Agent
-
-The research agent produces a portfolio universe sell-side research note. It is prompted to cover every ticker in the active Universe and structure output as:
-
-- Executive Summary
-- Coverage Matrix
-- Ticker-by-Ticker Notes
-- Portfolio Implications
-- Compliance Note
-
-The frontend calls:
+The approved-order endpoint accepts only a `supervisor_review_id`. It does not
+trust ticker, side, quantity, or price values supplied by the browser. The
+Lambda locks and validates the database review, requires `APPROVED` or
+`MODIFIED` status, creates one idempotent `orders` row, and publishes a paper
+order command to the IBKR commands FIFO queue.
 
 ```text
-POST /agents/research/run
+supervisor review in Aurora
+        │
+        ▼
+approved-order Lambda
+        │
+        ▼
+IBKR commands FIFO queue
+        │ outbound HTTPS long polling
+        ▼
+local SideChart connector ── 127.0.0.1:4002 ── IB Gateway ── IBKR
+        │
+        ▼
+IBKR events FIFO queue
+        │
+        ▼
+event-processor Lambda ── orders / fills / positions ── Aurora
 ```
 
-### Supervisor Agent
+The connector runs on the same computer as IB Gateway. It uses a SQLite command
+journal and durable event outbox, enforces paper/live mode and local order
+limits, and refuses ambiguous retries rather than risking a duplicate order.
+AWS never opens an inbound connection to the Gateway computer, and the IBKR API
+port must not be exposed to the internet.
 
-The supervisor agent consumes the research output, pipeline results, target weights, signals, and performance context. It produces a rebalance memo with:
+Terraform creates the connector IAM role and its least-privilege SQS policy.
+An IAM Roles Anywhere trust anchor/profile and local `credential_process` still
+need to be configured before an always-on connector can obtain temporary AWS
+credentials.
 
-- RebalanceProposal
-- Rationale
-- Target weight and action tables
-- Assumptions
-- Risks
-- Data quality and open items
+More detailed diagrams are available in
+[docs/architecture](docs/architecture/README.md), including the dedicated
+[agent architecture](docs/architecture/agent_architecture.png).
 
-The frontend calls:
+## Repository Layout
 
 ```text
-POST /agents/supervisor/run
+frontend/                       Next.js dashboard
+backend/server.py               Shared FastAPI-compatible API routes
+backend/researcher/             AWS researcher service and Function URL image
+backend/{planner,classifier}/   Asynchronous agent workflow
+backend/{reporter,charter}/     Reporting and chart agents
+backend/sell_side_agent/        Dedicated sell-side Lambda
+backend/supervisor_agent/       Dedicated supervisor Lambda
+backend/ibkr_order_api/         Approved-review order API
+backend/ibkr_event_processor/   SQS-to-Aurora broker event consumer
+backend/ibkr_connector/         Local outbound IBKR bridge
+backend/database/               Migrations and database verification
+src/contracts/                  Market, signal, risk, and execution contracts
+src/agents/                     Shared local research/supervisor behavior
+terraform/                      AWS infrastructure stacks and orchestration scripts
+docs/architecture/              Generated AWS diagrams and Python sources
+docs/database_schema/           PostgreSQL ERD and schema documentation
 ```
 
-## Frontend
+## Infrastructure Deployment
 
-The frontend is a Next.js dashboard in `frontend/`. It is designed as a restrained, professional interface for finance users.
+### Prerequisites
 
-Current UI capabilities:
+- AWS CLI authenticated to the target account
+- Terraform
+- Docker Desktop
+- Python and `uv`
+- Node.js and npm
+- IB Gateway for connector testing
 
-- Universe input box.
-- Lookback (In Days) and position count controls.
-- Backend health check.
-- Market data loading.
-- Automatic bullish-universe discovery when Universe is empty.
-- Signal generation.
-- Full analysis pipeline execution.
-- Target Allocation panel with draft portfolio weights.
-- Bullish/bearish signal book.
-- Latest indicator snapshot table.
-- Research context input.
-- Supervisor rationale brief preview.
-- Research agent trigger and rendered markdown output.
-- Supervisor agent trigger and rendered markdown output.
-- Raw supervisor context view.
-- Dry-run rebalance preview.
+Terraform variables containing credentials are intentionally ignored by Git.
+Configure the required `terraform.tfvars` files and the root `.env` before
+deployment.
 
-The agent output panels render common markdown structures including headings, lists, bold text, inline code, and markdown tables.
+### Apply all configured stacks
+
+Preview the dependency order:
+
+```bash
+python3 terraform/apply_all.py --dry-run
+```
+
+Apply the configured stacks:
+
+```bash
+python3 terraform/apply_all.py
+```
+
+The apply order is database, SageMaker, ingestion, agents, researcher, then
+frontend. A fresh researcher deployment also requires a container image URI;
+`backend/researcher/deploy.py` builds the image, pushes it to ECR, and writes the
+local Terraform image override.
+
+Apply and verify database migrations after the Aurora stack is available:
+
+```bash
+uv run python backend/database/run_migrations.py
+uv run python backend/database/verify_database.py
+```
+
+Deploy or refresh the researcher image when its source changes:
+
+```bash
+uv run python backend/researcher/deploy.py
+```
+
+### Destroy all stacks
+
+Preview the reverse dependency order:
+
+```bash
+python3 terraform/destroy_all.py --dry-run
+```
+
+Destroy the infrastructure:
+
+```bash
+python3 terraform/destroy_all.py
+```
+
+The destroy helper verifies and empties only the tagged Terraform-managed
+frontend bucket, including versions, delete markers, and multipart uploads. It
+then destroys the frontend first and the database last.
 
 ## Local Development
 
-Prerequisites:
-
-- Python with `uv`
-- Node.js
-- npm
-
-Install frontend dependencies if needed:
+Install the Python and frontend dependencies:
 
 ```bash
+uv sync
 cd frontend
 npm install
+cd ..
 ```
 
-Run the backend and frontend together:
+Run the local backend and frontend together:
 
 ```bash
 uv run run_local.py
 ```
 
-If `frontend/` is read-only, the runner uses a temporary writable copy with
-webpack. Restart the runner after editing frontend source files in this mode.
-
-The local runner starts:
+Local services:
 
 ```text
 Backend:  http://127.0.0.1:8000
@@ -207,40 +233,76 @@ Frontend: http://localhost:3000
 API docs: http://127.0.0.1:8000/docs
 ```
 
-You can skip prerequisite checks with:
+The local API provides market data, technical signals, the analysis pipeline,
+draft target weights, agent-compatible routes, dry-run execution, and direct
+development connectivity to a local IB Gateway.
+
+## Running the Local IBKR Connector
+
+Use paper trading first. IB Gateway normally listens on `4002` for paper mode
+and `4001` for live mode.
+
+Copy the settings from
+[backend/ibkr_connector/.env.example](backend/ibkr_connector/.env.example) into
+the root `.env`, including the queue URLs returned by:
 
 ```bash
-uv run run_local.py --skip-checks
+terraform -chdir=terraform/agents output -json ibkr_connector
 ```
 
-## Environment Variables
+Then run:
 
-Common environment variables:
+```bash
+uv run python -m backend.ibkr_connector.main
+```
+
+Creating the configured kill-switch file immediately blocks new commands:
 
 ```text
-OPENAI_API_KEY=...
-OPENAI_MODEL=gpt-4o-mini
-CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
-MARKET_DATA_MAX_TICKERS=120
-IB_HOST=127.0.0.1
-IB_PORT=7497
-IB_CLIENT_ID=17
-RESEARCHER_API_ENDPOINT=...
-RESEARCHER_API_KEY=...
-SUPERVISOR_API_ENDPOINT=...
-SUPERVISOR_API_KEY=...
-NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000
+.sidechart/IBKR_KILL_SWITCH
 ```
 
-Only `OPENAI_API_KEY` is required for live agent generation. Market data and most local backend routes can run without the research/supervisor ingestion keys.
+Live mode is rejected unless `IBKR_ALLOW_LIVE_TRADING=true`. Do not enable it
+until paper order placement, restarts, duplicate delivery, partial fills, and
+event replay have been tested.
 
-## Validation Commands
+## Primary API Routes
 
-Useful checks during development:
+| Method | Route | Purpose |
+|---|---|---|
+| `GET` | `/health` | Backend health |
+| `POST` | `/market-data` | yfinance-backed OHLCV retrieval |
+| `POST` | `/signals/generate` | Technical signal generation |
+| `POST` | `/pipeline/dev/analyze` | Market pipeline and draft weights |
+| `POST` | `/agents/research/run` | Interactive sell-side research |
+| `POST` | `/agents/supervisor/run` | Human-reviewable supervisor proposal |
+| `POST` | `/broker/ibkr/orders` | Queue an existing approved database review |
+| `GET` | `/broker/ibkr/status` | Broker connection/status contract |
+| `POST` | `/execution/rebalance` | Local/dry-run rebalance contract |
+
+The deployed browser prefixes proxied routes with `/api`. The researcher agent
+uses its Function URL directly for long-running requests.
+
+## Validation
+
+Run the focused Python tests:
 
 ```bash
-python3 -m py_compile backend/server.py src/contracts/signals.py src/contracts/dev/market_data.py src/contracts/dev/pipeline.py src/contracts/dev/risk.py
+uv run python -m unittest \
+  backend.database.test_run_migrations \
+  backend.ibkr_connector.test_connector \
+  backend.ibkr_event_processor.test_lambda_handler \
+  backend.ibkr_order_api.test_lambda_handler
 ```
+
+Validate Terraform stacks:
+
+```bash
+terraform -chdir=terraform/agents validate
+terraform -chdir=terraform/frontend validate
+```
+
+Validate the frontend:
 
 ```bash
 cd frontend
@@ -248,19 +310,39 @@ npm run lint
 npx tsc --noEmit --incremental false
 ```
 
-## Current Limitations
+Regenerate architecture diagrams:
 
-- Market data depends on yfinance availability and upstream ticker sources.
-- Agent outputs depend on OpenAI API configuration and should be reviewed by a human.
-- IBKR execution paths are present, but the current frontend path emphasizes dry-run previews.
-- Research/valuation data is limited to the supplied context unless additional external data tools are connected.
-- This project is not yet production hardened for authentication, audit logging, execution approvals, or portfolio accounting.
+```bash
+uv run python docs/architecture/system_architecture.py
+uv run python docs/architecture/agent_design.py
+uv run python docs/architecture/data_flow.py
+```
 
-## Near-Term Next Steps
+## Current Integration Boundaries
 
-- Add persisted run history for research, supervisor outputs, and rebalance proposals.
-- Add richer current holdings integration in the frontend.
-- Add explicit approval states before any paper/live execution.
-- Expand data quality reporting for failed tickers and stale market rows.
-- Add focused tests for market discovery, signal classification, optimizer fallbacks, and agent endpoint payloads.
-- Consider richer markdown rendering if agent output grows beyond the current supported subset.
+- The deployed frontend still contains legacy direct buy/sell actions. Those
+  actions are not yet wired to the approved-review API contract.
+- The current IBKR status/holdings UI routes were originally designed for a
+  process-local Gateway connection. They still need to read connector heartbeat
+  and portfolio state from Aurora in the deployed AWS environment.
+- Supervisor output is a reviewable proposal, but the UI does not yet persist a
+  complete `supervisor_reviews` record automatically.
+- The dedicated sell-side Lambda is deployed for standalone invocation, while
+  the interactive research route runs inside the researcher service.
+- The analysis-jobs queue has a planner consumer but no current browser producer.
+- Public frontend APIs do not yet have replacement authentication after Clerk
+  removal. Keep execution in paper mode until authentication and authorization
+  are implemented.
+- The planner, classifier, reporter, and charter folders retain parts of a
+  legacy portfolio schema. Their SQS workflow requires further alignment with
+  the current HITL trading tables before it should be treated as production.
+
+## Safety
+
+- Keep IBKR in paper mode during development.
+- Never expose ports `4001`, `4002`, `7496`, or `7497` to the public internet.
+- Treat `.env`, Terraform variable files, certificates, and AWS credentials as
+  secrets.
+- Require a persisted human approval before creating any broker command.
+- Review all agent recommendations and validate prices, quantities, and account
+  mode before execution.
